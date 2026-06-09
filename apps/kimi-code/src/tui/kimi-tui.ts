@@ -22,14 +22,13 @@ import type {
   Session,
 } from '@moonshot-ai/kimi-code-sdk';
 import chalk from 'chalk';
+import { resolve } from 'pathe';
 
 import type { CLIOptions } from '#/cli/options';
 import { MigrationScreenComponent, type MigrationScreenResult } from '#/migration/index';
-import type { GitLsFilesCache } from '#/utils/git/git-ls-files';
-import { createGitLsFilesCache } from '#/utils/git/git-ls-files';
 import { appendInputHistory, loadInputHistory } from '#/utils/history/input-history';
 import { getInputHistoryFile } from '#/utils/paths';
-import { detectFdPath } from '#/utils/process/fd-detect';
+import { detectFdPath, ensureFdPath } from '#/utils/process/fd-detect';
 
 import {
   BUILTIN_SLASH_COMMANDS,
@@ -70,7 +69,11 @@ import { FileMentionProvider } from './components/editor/file-mention-provider';
 import { AssistantMessageComponent } from './components/messages/assistant-message';
 import { BackgroundAgentStatusComponent } from './components/messages/background-agent-status';
 import { CronMessageComponent } from './components/messages/cron-message';
-import { GoalCompletionMessageComponent } from './components/messages/goal-panel';
+import { buildGoalMarker } from './components/messages/goal-markers';
+import {
+  GoalCompletionMessageComponent,
+  GoalSetMessageComponent,
+} from './components/messages/goal-panel';
 import { SkillActivationComponent } from './components/messages/skill-activation';
 import {
   NoticeMessageComponent,
@@ -112,7 +115,7 @@ import {
   type TUIStartupState,
 } from './types';
 import { createTUIState, type TUIState } from './tui-state';
-import { isExpandable, isPlanExpandable } from './utils/component-capabilities';
+import { isExpandable } from './utils/component-capabilities';
 import { isDeadTerminalError } from './utils/dead-terminal';
 import { formatErrorMessage } from './utils/event-payload';
 import { ImageAttachmentStore, type ImageAttachment } from './utils/image-attachment-store';
@@ -162,6 +165,7 @@ function createInitialAppState(input: KimiTUIStartupInput): AppState {
     sessionId: '',
     permissionMode: startupPermission,
     planMode: input.cliOptions.plan,
+    swarmMode: false,
     thinking: false,
     contextUsage: 0,
     contextTokens: 0,
@@ -200,8 +204,8 @@ export class KimiTUI {
   private skillCommands: readonly KimiSlashCommand[] = [];
   readonly skillCommandMap = new Map<string, string>();
   private readonly imageStore = new ImageAttachmentStore();
-  private readonly fdPath: string | null = detectFdPath();
-  private readonly gitLsFilesCache: GitLsFilesCache;
+  private fdPath: string | null = detectFdPath();
+  private fdDownloadStarted = false;
   sessionEventUnsubscribe: (() => void) | undefined;
   cancelInFlight: (() => void) | undefined;
   deferUserMessages = false;
@@ -270,7 +274,6 @@ export class KimiTUI {
     this.uninstallRainbowDance = installRainbowDance(() => {
       this.state.ui.requestRender();
     });
-    this.gitLsFilesCache = createGitLsFilesCache(tuiOptions.initialAppState.workDir);
 
     this.reverseRpcDisposers.push(
       ...registerReverseRPCHandlers(this.approvalController, this.questionController, {
@@ -326,7 +329,6 @@ export class KimiTUI {
       slashCommands,
       this.state.appState.workDir,
       this.fdPath,
-      this.gitLsFilesCache,
     );
     this.state.editor.setAutocompleteProvider(provider);
   }
@@ -381,6 +383,7 @@ export class KimiTUI {
             return;
           }
           const shouldReplayHistory = await this.initMainTui();
+          this.startBackgroundFdAutocomplete();
           await this.finishStartup(shouldReplayHistory);
         } catch (error) {
           this.disposeTerminalTracking();
@@ -393,6 +396,7 @@ export class KimiTUI {
       const shouldReplayHistory = await this.initMainTui();
       this.startEventLoop();
       try {
+        this.startBackgroundFdAutocomplete();
         await this.finishStartup(shouldReplayHistory);
       } catch (error) {
         this.disposeTerminalTracking();
@@ -423,6 +427,21 @@ export class KimiTUI {
     this.state.ui.start();
     this.terminalFocusTrackingDispose = installTerminalFocusTracking(this.state);
     this.refreshTerminalThemeTracking();
+  }
+
+  private startBackgroundFdAutocomplete(): void {
+    if (this.fdPath !== null || this.fdDownloadStarted) return;
+    this.fdDownloadStarted = true;
+
+    void ensureFdPath()
+      .then((fdPath) => {
+        if (fdPath === null) return;
+        this.fdPath = fdPath;
+        this.setupAutocomplete();
+      })
+      .catch(() => {
+        // Best-effort background bootstrap: autocomplete keeps using the filesystem fallback.
+      });
   }
 
   private async refreshProviderModelsInBackground(): Promise<void> {
@@ -511,7 +530,7 @@ export class KimiTUI {
           if (target === undefined) {
             throw new Error(`Session "${startup.sessionFlag}" not found.`);
           }
-          if (target.workDir !== workDir) {
+          if (resolve(target.workDir) !== resolve(workDir)) {
             this.state.ui.stop();
             process.stderr.write(
               `${chalk.hex(this.state.theme.colors.warning)(
@@ -1026,9 +1045,7 @@ export class KimiTUI {
   async syncRuntimeState(session: Session = this.requireSession()): Promise<void> {
     const [status, goalResult] = await Promise.all([
       session.getStatus(),
-      isExperimentalFlagEnabled('goal_command')
-        ? session.getGoal()
-        : Promise.resolve({ goal: null }),
+      session.getGoal(),
     ]);
     this.setAppState({
       sessionId: session.id,
@@ -1036,6 +1053,7 @@ export class KimiTUI {
       thinking: status.thinkingLevel !== 'off',
       permissionMode: status.permission,
       planMode: status.planMode,
+      swarmMode: status.swarmMode ?? false,
       contextTokens: status.contextTokens,
       maxContextTokens: status.maxContextTokens,
       contextUsage: status.contextUsage,
@@ -1066,6 +1084,7 @@ export class KimiTUI {
     this.approvalController.cancelAll(reason);
     this.questionController.cancelAll(reason);
     this.session = undefined;
+    this.state.swarmModeEntry = undefined;
     this.harness.setTelemetryContext({ sessionId: null });
     this.setAppState({ goal: null });
     return previous;
@@ -1112,6 +1131,7 @@ export class KimiTUI {
     this.aborted = false;
     this.streamingUI.discardPending();
     this.state.queuedMessages = [];
+    this.state.swarmModeEntry = undefined;
     this.harness.interactiveAgentId = MAIN_AGENT_ID;
     this.streamingUI.resetToolCallState();
     this.streamingUI.resetToolUi();
@@ -1281,6 +1301,18 @@ export class KimiTUI {
           entry.cronData ?? {},
           this.state.theme.colors,
         );
+      case 'goal':
+        if (entry.goalData?.kind === 'created') {
+          return new GoalSetMessageComponent(this.state.theme.colors);
+        }
+        if (entry.goalData?.kind === 'lifecycle') {
+          return buildGoalMarker(
+            entry.goalData.change,
+            this.state.theme.colors,
+            this.state.toolOutputExpanded,
+          );
+        }
+        return null;
       case 'assistant': {
         if (entry.content.trimStart().startsWith('✓ Goal complete')) {
           return new GoalCompletionMessageComponent(entry.content, this.state.theme.colors);
@@ -1308,7 +1340,6 @@ export class KimiTUI {
             this.state.appState.workDir,
           );
           if (this.state.toolOutputExpanded) tc.setExpanded(true);
-          if (this.state.planExpanded) tc.setPlanExpanded(true);
           return tc;
         }
         if (entry.backgroundAgentStatus !== undefined) {
@@ -1468,24 +1499,32 @@ export class KimiTUI {
   updateActivityPane(): void {
     const effectiveMode = this.resolveActivityPaneMode();
     this.syncTerminalProgress(this.shouldShowTerminalProgress(effectiveMode));
+    const placeSpinnerInAgentSwarm = this.shouldPlaceActivitySpinnerInAgentSwarm(effectiveMode);
+    const activityModeKey = `${effectiveMode}:${placeSpinnerInAgentSwarm ? 'swarm' : 'pane'}`;
 
     if (
-      effectiveMode === this.lastActivityMode &&
+      activityModeKey === this.lastActivityMode &&
       (effectiveMode === 'waiting' || effectiveMode === 'thinking' || effectiveMode === 'tool')
     ) {
+      if (placeSpinnerInAgentSwarm) {
+        this.syncAgentSwarmActivitySpinner(this.state.activitySpinner?.instance);
+      }
       return;
     }
 
-    this.lastActivityMode = effectiveMode;
+    this.lastActivityMode = activityModeKey;
     this.state.activityContainer.clear();
 
     switch (effectiveMode) {
       case 'hidden':
         this.stopActivitySpinner();
+        this.syncAgentSwarmActivitySpinner(undefined);
         this.state.ui.requestRender();
         return;
       case 'waiting': {
         const spinner = this.ensureActivitySpinner('moon');
+        this.syncAgentSwarmActivitySpinner(placeSpinnerInAgentSwarm ? spinner : undefined);
+        if (placeSpinnerInAgentSwarm) break;
         this.state.activityContainer.addChild(
           new ActivityPaneComponent({
             mode: 'waiting',
@@ -1496,12 +1535,14 @@ export class KimiTUI {
       }
       case 'thinking': {
         this.stopActivitySpinner();
+        this.syncAgentSwarmActivitySpinner(undefined);
         break;
       }
       case 'composing': {
         const spinner = this.ensureActivitySpinner('braille', 'working...', (s) =>
           chalk.hex(this.state.theme.colors.primary)(s),
         );
+        this.syncAgentSwarmActivitySpinner(undefined);
         this.state.activityContainer.addChild(
           new ActivityPaneComponent({
             mode: 'composing',
@@ -1512,6 +1553,8 @@ export class KimiTUI {
       }
       case 'tool': {
         const spinner = this.ensureActivitySpinner('moon');
+        this.syncAgentSwarmActivitySpinner(placeSpinnerInAgentSwarm ? spinner : undefined);
+        if (placeSpinnerInAgentSwarm) break;
         this.state.activityContainer.addChild(
           new ActivityPaneComponent({
             mode: 'tool',
@@ -1523,6 +1566,7 @@ export class KimiTUI {
       case 'idle':
       case 'session': {
         this.stopActivitySpinner();
+        this.syncAgentSwarmActivitySpinner(undefined);
         break;
       }
     }
@@ -1569,21 +1613,6 @@ export class KimiTUI {
       }
     }
     this.state.ui.requestRender();
-  }
-
-  // Returns true when at least one card toggled, so the caller can consume the keystroke.
-  togglePlanExpansion(): boolean {
-    const next = !this.state.planExpanded;
-    let toggled = false;
-    for (const child of this.state.transcriptContainer.children) {
-      if (isPlanExpandable(child) && child.setPlanExpanded(next)) {
-        toggled = true;
-      }
-    }
-    if (!toggled) return false;
-    this.state.planExpanded = next;
-    this.state.ui.requestRender();
-    return true;
   }
 
   updateEditorBorderHighlight(text?: string): void {
@@ -1634,6 +1663,17 @@ export class KimiTUI {
       effectiveMode === 'composing' ||
       effectiveMode === 'tool'
     );
+  }
+
+  private shouldPlaceActivitySpinnerInAgentSwarm(effectiveMode: EffectiveActivityPaneMode): boolean {
+    return (
+      this.sessionEventHandler.hasActiveAgentSwarmToolCall() &&
+      (effectiveMode === 'waiting' || effectiveMode === 'tool')
+    );
+  }
+
+  private syncAgentSwarmActivitySpinner(spinner: MoonLoader | undefined): void {
+    this.sessionEventHandler.syncAgentSwarmActivitySpinner(spinner);
   }
 
   private syncTerminalProgress(active: boolean): void {
@@ -1757,18 +1797,32 @@ export class KimiTUI {
 
   private async bootstrapFromPicker(): Promise<void> {
     await this.fetchSessions();
-    this.mountSessionPicker(() => {
-      this.hideSessionPicker();
-      void this.stop();
-    });
+    this.mountSessionPicker(
+      () => {
+        this.hideSessionPicker();
+        void this.stop();
+      },
+      {
+        onCtrlC: () => {
+          this.state.editor.onCtrlC?.();
+        },
+        onCtrlD: () => {
+          this.state.editor.onCtrlD?.();
+        },
+      },
+    );
   }
 
   hideSessionPicker(): void {
+    this.editorKeyboard.clearPendingExit();
     this.state.activeDialog = null;
     this.restoreEditor();
   }
 
-  private mountSessionPicker(onCancel: () => void): void {
+  private mountSessionPicker(
+    onCancel: () => void,
+    shortcuts: { readonly onCtrlC?: () => void; readonly onCtrlD?: () => void } = {},
+  ): void {
     this.state.activeDialog = 'session-picker';
     this.mountEditorReplacement(
       new SessionPickerComponent({
@@ -1784,6 +1838,8 @@ export class KimiTUI {
           });
         },
         onCancel,
+        onCtrlC: shortcuts.onCtrlC,
+        onCtrlD: shortcuts.onCtrlD,
       }),
     );
   }
@@ -1802,9 +1858,6 @@ export class KimiTUI {
       this.state.theme.colors,
       () => {
         this.toggleToolOutputExpansion();
-      },
-      () => {
-        this.togglePlanExpansion();
       },
       (block) => {
         this.openApprovalPreview(panel, block);
@@ -1875,9 +1928,6 @@ export class KimiTUI {
       undefined,
       () => {
         this.toggleToolOutputExpansion();
-      },
-      () => {
-        this.togglePlanExpansion();
       },
     );
     this.mountEditorReplacement(dialog);

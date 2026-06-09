@@ -56,7 +56,7 @@ import type {
   CreateGoalPayload,
   CreateSessionPayload,
   EmptyPayload,
-  GoalControlPayload,
+  EnterSwarmPayload,
   GoalSnapshot,
   GoalToolResult,
   ExportSessionPayload,
@@ -67,7 +67,6 @@ import type {
   GetKimiConfigPayload,
   GetPluginInfoPayload,
   InstallPluginPayload,
-  JsonObject,
   ListSessionsPayload,
   McpServerInfo,
   McpStartupMetrics,
@@ -105,12 +104,6 @@ import { KaosShellNotFoundError, LocalKaos, type Kaos } from '@moonshot-ai/kaos'
 import type { ToolServices } from '../tools/support/services';
 
 const KIMI_CODE_PROVIDER_NAME = 'managed:kimi-code';
-const GOAL_FORK_CLEARED_REMINDER = [
-  'This fork does not have a current goal.',
-  'Ignore earlier active-goal reminders from the source session.',
-  'Handle requests normally unless the user starts a new goal.',
-].join(' ');
-
 type AgentScopedPayload<T> = T & { readonly agentId: string };
 type SessionScopedPayload<T> = T & { readonly sessionId: string };
 type SessionAgentPayload<T> = SessionScopedPayload<AgentScopedPayload<T>>;
@@ -195,6 +188,13 @@ export class KimiCore implements PromisableMethods<CoreAPI> {
   }
 
   async createSession(input: CreateSessionPayload): Promise<SessionSummary> {
+    return this.createSessionWithOverrides(input, {});
+  }
+
+  async createSessionWithOverrides(
+    input: CreateSessionPayload,
+    overrides: { kaos?: Kaos; persistenceKaos?: Kaos },
+  ): Promise<SessionSummary> {
     const options = input;
     const workDir = requiredWorkDir('createSession', options.workDir);
     const config = this.reloadProviderManager();
@@ -223,8 +223,11 @@ export class KimiCore implements PromisableMethods<CoreAPI> {
     // Session ctor attaches its own log sink. If anything in the setup-after-
     // ctor block throws, `session.close()` releases the sink (and mcp).
     const runtime = await this.resolveRuntime(config);
+    const parentKaos = overrides.kaos ?? (await this.getKaos());
+    const persistenceKaos = overrides.persistenceKaos ?? parentKaos;
     const session = new Session({
-      kaos: (await this.getKaos()).withCwd(workDir),
+      kaos: parentKaos.withCwd(workDir),
+      persistenceKaos,
       toolServices: runtime,
       config,
       id,
@@ -297,9 +300,19 @@ export class KimiCore implements PromisableMethods<CoreAPI> {
   }
 
   async resumeSession(input: ResumeSessionPayload): Promise<ResumeSessionResult> {
+    return this.resumeSessionWithOverrides(input, {});
+  }
+
+  async resumeSessionWithOverrides(
+    input: ResumeSessionPayload,
+    overrides: { kaos?: Kaos; persistenceKaos?: Kaos },
+  ): Promise<ResumeSessionResult> {
     const summary = await this.sessionStore.get(input.sessionId);
     const active = this.sessions.get(summary.id);
     if (active !== undefined) {
+      if (overrides.kaos !== undefined) {
+        active.setToolKaos(overrides.kaos.withCwd(summary.workDir));
+      }
       return resumeSessionResult(summary, active);
     }
 
@@ -314,8 +327,11 @@ export class KimiCore implements PromisableMethods<CoreAPI> {
     const mcpConfig = this.mergePluginMcpConfig(withCallerMcp);
     const { profiles, initPrompt } = await this.resolveAgentProfiles();
     const runtime = await this.resolveRuntime(config);
+    const parentKaos = overrides.kaos ?? (await this.getKaos());
+    const persistenceKaos = overrides.persistenceKaos ?? parentKaos;
     const session = new Session({
-      kaos: (await this.getKaos()).withCwd(summary.workDir),
+      kaos: parentKaos.withCwd(summary.workDir),
+      persistenceKaos,
       toolServices: runtime,
       config,
       id: summary.id,
@@ -377,10 +393,8 @@ export class KimiCore implements PromisableMethods<CoreAPI> {
   async forkSession(input: ForkSessionPayload): Promise<ResumeSessionResult> {
     const source = await this.sessionStore.get(input.sessionId);
     const active = this.sessions.get(source.id);
-    let sourceHadGoal = hasGoalMetadata(source.metadata) || hasGoalMetadata(input.metadata);
     if (active !== undefined) {
       await active.flushMetadata();
-      sourceHadGoal = sourceHadGoal || active.goals.getGoal().goal !== null;
     }
 
     const id = input.id ?? createSessionId();
@@ -390,19 +404,7 @@ export class KimiCore implements PromisableMethods<CoreAPI> {
       title: input.title,
       metadata: input.metadata,
     });
-    const resumed = await this.resumeSession({ sessionId: id });
-    if (sourceHadGoal) {
-      const forked = this.sessions.get(id);
-      if (forked !== undefined) {
-        const mainAgent = await forked.ensureAgentResumed('main');
-        mainAgent.context.appendSystemReminder(GOAL_FORK_CLEARED_REMINDER, {
-          kind: 'system_trigger',
-          name: 'goal_fork_cleared',
-        });
-        await forked.flushMetadata();
-      }
-    }
-    return resumed;
+    return this.resumeSession({ sessionId: id });
   }
 
   async listSessions(input: ListSessionsPayload = {}): Promise<readonly SessionSummary[]> {
@@ -541,6 +543,18 @@ export class KimiCore implements PromisableMethods<CoreAPI> {
     return this.sessionApi(sessionId).clearPlan(payload);
   }
 
+  enterSwarm({ sessionId, ...payload }: SessionAgentPayload<EnterSwarmPayload>) {
+    return this.sessionApi(sessionId).enterSwarm(payload);
+  }
+
+  exitSwarm({ sessionId, ...payload }: SessionAgentPayload<EmptyPayload>) {
+    return this.sessionApi(sessionId).exitSwarm(payload);
+  }
+
+  getSwarmMode({ sessionId, ...payload }: SessionAgentPayload<EmptyPayload>) {
+    return this.sessionApi(sessionId).getSwarmMode(payload);
+  }
+
   beginCompaction({ sessionId, ...payload }: SessionAgentPayload<BeginCompactionPayload>) {
     return this.sessionApi(sessionId).beginCompaction(payload);
   }
@@ -655,32 +669,32 @@ export class KimiCore implements PromisableMethods<CoreAPI> {
   createGoal({
     sessionId,
     ...payload
-  }: SessionScopedPayload<CreateGoalPayload>): Promise<GoalSnapshot> {
+  }: SessionAgentPayload<CreateGoalPayload>): Promise<GoalSnapshot> {
     return Promise.resolve(this.sessionApi(sessionId).createGoal(payload));
   }
 
-  getGoal({ sessionId, ...payload }: SessionScopedPayload<EmptyPayload>): GoalToolResult {
-    return this.sessionApi(sessionId).getGoal(payload);
+  getGoal({ sessionId, ...payload }: SessionAgentPayload<EmptyPayload>): Promise<GoalToolResult> {
+    return Promise.resolve(this.sessionApi(sessionId).getGoal(payload));
   }
 
   pauseGoal({
     sessionId,
     ...payload
-  }: SessionScopedPayload<GoalControlPayload>): Promise<GoalSnapshot> {
+  }: SessionAgentPayload<EmptyPayload>): Promise<GoalSnapshot> {
     return Promise.resolve(this.sessionApi(sessionId).pauseGoal(payload));
   }
 
   resumeGoal({
     sessionId,
     ...payload
-  }: SessionScopedPayload<GoalControlPayload>): Promise<GoalSnapshot> {
+  }: SessionAgentPayload<EmptyPayload>): Promise<GoalSnapshot> {
     return Promise.resolve(this.sessionApi(sessionId).resumeGoal(payload));
   }
 
   cancelGoal({
     sessionId,
     ...payload
-  }: SessionScopedPayload<GoalControlPayload>): Promise<GoalSnapshot> {
+  }: SessionAgentPayload<EmptyPayload>): Promise<GoalSnapshot> {
     return Promise.resolve(this.sessionApi(sessionId).cancelGoal(payload));
   }
 
@@ -783,6 +797,7 @@ export class KimiCore implements PromisableMethods<CoreAPI> {
     const explicitDirs = this.skillDirs.length > 0 ? this.skillDirs : undefined;
     return {
       userHomeDir: this.userHomeDir,
+      brandHomeDir: this.homeDir,
       explicitDirs,
       extraDirs: config.extraSkillDirs,
       pluginSkillRoots: this.plugins.pluginSkillRoots(),
@@ -946,10 +961,6 @@ function nonEmptyString(value: string | undefined): string | undefined {
   return trimmed === undefined || trimmed.length === 0 ? undefined : trimmed;
 }
 
-function hasGoalMetadata(metadata: JsonObject | undefined): boolean {
-  return metadata !== undefined && 'goal' in metadata;
-}
-
 function requiredWorkDir(operation: string, value: string): string {
   if (typeof value !== 'string' || value.trim() === '') {
     throw new KimiError(ErrorCodes.REQUEST_WORK_DIR_REQUIRED, `${operation} requires workDir`);
@@ -981,6 +992,7 @@ async function resumeSessionResult(
     const context = await api.getContext({ agentId });
     const permission = await api.getPermission({ agentId });
     const plan = await api.getPlan({ agentId });
+    const swarmMode = await api.getSwarmMode({ agentId });
     const usage = await api.getUsage({ agentId });
     agents[agentId] = {
       type: agent.type,
@@ -989,6 +1001,7 @@ async function resumeSessionResult(
       replay: agent.replayBuilder.buildResult(),
       permission,
       plan,
+      swarmMode,
       usage,
       tools: await api.getTools({ agentId }),
       toolStore: agent.tools.storeData(),
