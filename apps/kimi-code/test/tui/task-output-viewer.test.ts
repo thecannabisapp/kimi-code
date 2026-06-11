@@ -57,6 +57,7 @@ function makeViewer(opts: {
   rows?: number;
   columns?: number;
   onClose?: () => void;
+  reverseOrder?: boolean;
 }): TaskOutputViewer {
   return new TaskOutputViewer(
     {
@@ -64,6 +65,7 @@ function makeViewer(opts: {
       info: opts.taskInfo ?? info(),
       output: opts.output,
       onClose: opts.onClose ?? (() => {}),
+      reverseOrder: opts.reverseOrder,
     },
     fakeTerminal(opts.rows ?? 30, opts.columns ?? 120),
   );
@@ -111,71 +113,118 @@ describe('TaskOutputViewer — rendering', () => {
     expect(out).toContain('delta');
     expect(out).toContain('echo');
   });
+
+  it('wraps long lines instead of truncating', () => {
+    const longLine = 'a'.repeat(300);
+    const rendered = makeViewer({ output: longLine, rows: 20, columns: 40 }).render(40);
+    const bodyRows = rendered.slice(2, rendered.length - 2);
+    // The 300-column line should wrap across multiple display rows in a 36-column body.
+    const wrappedRows = bodyRows.filter((line) => strip(line).includes('aaaa'));
+    expect(wrappedRows.length).toBeGreaterThan(1);
+  });
+
+  it('renders markdown formatting through the Markdown pipeline', () => {
+    const output = '# heading\n**bold** and `code`';
+    const out = makeViewer({ output, rows: 20 }).render(120).join('\n');
+    // The heading hash prefix is stripped by createMarkdownTheme; the rendered body
+    // should contain the heading text, bold text, and code text.
+    expect(strip(out)).toContain('heading');
+    expect(strip(out)).toContain('bold');
+    expect(strip(out)).toContain('code');
+  });
 });
 
-describe('TaskOutputViewer — scrolling', () => {
+describe('TaskOutputViewer — scrolling (reverse order default)', () => {
   function bigOutput(n: number): string {
     return Array.from({ length: n }, (_, i) => `line-${String(i + 1).padStart(3, '0')}`).join('\n');
   }
 
-  it('renders the top of the buffer initially', () => {
+  it('renders the newest output at the top initially', () => {
     const viewer = makeViewer({ output: bigOutput(100), rows: 20 });
     const out = strip(viewer.render(120).join('\n'));
-    expect(out).toContain('line-001');
-    expect(out).not.toContain('line-100');
-  });
-
-  it('down arrow scrolls forward by one line', () => {
-    const viewer = makeViewer({ output: bigOutput(50), rows: 12 });
-    viewer.handleInput('[B');
-    const out = strip(viewer.render(120).join('\n'));
-    expect(out).toContain('line-002');
+    expect(out).toContain('line-100');
     expect(out).not.toContain('line-001');
   });
 
-  it('PageDown scrolls a page', () => {
+  it('down arrow scrolls toward older output', () => {
     const viewer = makeViewer({ output: bigOutput(50), rows: 12 });
-    // PageDown via prompt-toolkit-style sequence "[6~"
-    viewer.handleInput('[6~');
+    viewer.handleInput('\u001B[B');
+    const out = strip(viewer.render(120).join('\n'));
+    expect(out).toContain('line-049');
+    expect(out).not.toContain('line-050');
+  });
+
+  it('PageDown scrolls a page toward older output', () => {
+    const viewer = makeViewer({ output: bigOutput(50), rows: 12 });
+    // PageDown via prompt-toolkit-style sequence "\u001B[6~"
+    viewer.handleInput('\u001B[6~');
     const out = strip(viewer.render(120).join('\n'));
     // body has 12 - 2 (header/footer) - 2 (top/bot border) = 8 viewable rows.
     // PageDown shifts by (body - 1) = 7 lines.
-    expect(out).toContain('line-008');
-    expect(out).not.toContain('line-001');
+    expect(out).toContain('line-043');
+    expect(out).not.toContain('line-050');
   });
 
-  it('G jumps to the bottom', () => {
+  it('G jumps to the bottom (oldest output)', () => {
     const viewer = makeViewer({ output: bigOutput(100), rows: 14 });
     viewer.handleInput('G');
     const out = strip(viewer.render(120).join('\n'));
-    expect(out).toContain('line-100');
+    expect(out).toContain('line-001');
     // Footer reads 100% at the end.
     expect(out).toContain('100%');
   });
 
-  it('g jumps back to the top', () => {
+  it('g jumps back to the top (newest output)', () => {
     const viewer = makeViewer({ output: bigOutput(100), rows: 14 });
     viewer.handleInput('G');
     viewer.handleInput('g');
     const out = strip(viewer.render(120).join('\n'));
-    expect(out).toContain('line-001');
+    expect(out).toContain('line-100');
   });
 
   it('scrolling clamps at the start and end', () => {
     const viewer = makeViewer({ output: bigOutput(5), rows: 20 });
     // Scrolling down on a buffer smaller than the body should not advance.
-    viewer.handleInput('[B');
-    viewer.handleInput('[B');
+    viewer.handleInput('\u001B[B');
+    viewer.handleInput('\u001B[B');
+    const out = strip(viewer.render(120).join('\n'));
+    expect(out).toContain('line-005');
+    expect(out).toContain('line-001');
+  });
+});
+
+describe('TaskOutputViewer — scrolling (oldest-first)', () => {
+  function bigOutput(n: number): string {
+    return Array.from({ length: n }, (_, i) => `line-${String(i + 1).padStart(3, '0')}`).join('\n');
+  }
+
+  it('renders the oldest output at the top when reverseOrder is false', () => {
+    const viewer = makeViewer({ output: bigOutput(100), rows: 20, reverseOrder: false });
     const out = strip(viewer.render(120).join('\n'));
     expect(out).toContain('line-001');
-    expect(out).toContain('line-005');
+    expect(out).not.toContain('line-100');
+  });
+
+  it('down arrow scrolls toward newer output in oldest-first mode', () => {
+    const viewer = makeViewer({ output: bigOutput(50), rows: 12, reverseOrder: false });
+    viewer.handleInput('\u001B[B');
+    const out = strip(viewer.render(120).join('\n'));
+    expect(out).toContain('line-002');
+    expect(out).not.toContain('line-001');
+  });
+
+  it('G jumps to the bottom (newest output) in oldest-first mode', () => {
+    const viewer = makeViewer({ output: bigOutput(100), rows: 14, reverseOrder: false });
+    viewer.handleInput('G');
+    const out = strip(viewer.render(120).join('\n'));
+    expect(out).toContain('line-100');
   });
 });
 
 describe('TaskOutputViewer — input', () => {
   it('Esc invokes onClose', () => {
     const onClose = vi.fn();
-    makeViewer({ output: 'x', onClose }).handleInput('');
+    makeViewer({ output: 'x', onClose }).handleInput('\u001B');
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
@@ -193,14 +242,14 @@ describe('TaskOutputViewer — input', () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
-  it('Kitty-encoded G scrolls to bottom', () => {
+  it('Kitty-encoded G scrolls to bottom (oldest output in reversed mode)', () => {
     const viewer = makeViewer({
       output: Array.from({ length: 200 }, (_, i) => `line-${String(i)}`).join('\n'),
       rows: 10,
     });
     viewer.handleInput('\u001B[71u'); // G (uppercase)
     const rendered = strip(viewer.render(120).join('\n'));
-    expect(rendered).toContain('line-199');
+    expect(rendered).toContain('line-0');
   });
 });
 
@@ -209,10 +258,11 @@ describe('TaskOutputViewer — live tail via setProps', () => {
     return Array.from({ length: n }, (_, i) => `line-${String(i + 1).padStart(3, '0')}`).join('\n');
   }
 
-  it('follows new lines when the viewer is already parked at the bottom', () => {
-    // 5 lines, body has ~26 viewable rows → user is at bottom by default.
+  it('stays at the top (newest) when new output arrives while already at the top', () => {
+    // With only 5 lines the viewport already shows everything, so the viewer is
+    // at the top (newest). New output keeps us pinned to the top so the latest
+    // lines remain visible.
     const viewer = makeViewer({ output: makeOutput(5), rows: 30 });
-    viewer.handleInput('G');
     // Append more lines.
     viewer.setProps({
       taskId: 'bash-aaaaaaaa',
@@ -224,11 +274,11 @@ describe('TaskOutputViewer — live tail via setProps', () => {
     expect(out).toContain('line-050');
   });
 
-  it('preserves scroll position when the user has scrolled up', () => {
+  it('stays at the top (newest) when new output arrives while parked at the top', () => {
     const viewer = makeViewer({ output: makeOutput(100), rows: 14 });
-    // Body has 14 - 4 = 10 viewable rows; max scroll = 90. Stay at top (0).
-    expect(strip(viewer.render(120).join('\n'))).toContain('line-001');
-    // Output grows. Since user is at scroll=0 (not bottom), keep them at top.
+    // Body has 14 - 4 = 10 viewable rows; max scroll = 90. Viewer starts at top (0).
+    expect(strip(viewer.render(120).join('\n'))).toContain('line-100');
+    // Output grows. Since user is at scroll=0 (top), keep them at top.
     viewer.setProps({
       taskId: 'bash-aaaaaaaa',
       info: info(),
@@ -236,8 +286,8 @@ describe('TaskOutputViewer — live tail via setProps', () => {
       onClose: () => {},
     });
     const out = strip(viewer.render(120).join('\n'));
-    expect(out).toContain('line-001');
-    expect(out).not.toContain('line-200');
+    expect(out).toContain('line-200');
+    expect(out).not.toContain('line-001');
   });
 
   it('skips re-split when output is unchanged', () => {
@@ -253,5 +303,20 @@ describe('TaskOutputViewer — live tail via setProps', () => {
     });
     const after = strip(viewer.render(120).join('\n'));
     expect(after).toBe(before);
+  });
+
+  it('reacts to reverseOrder prop changes', () => {
+    const viewer = makeViewer({ output: makeOutput(100), rows: 14 });
+    expect(strip(viewer.render(120).join('\n'))).toContain('line-100');
+    viewer.setProps({
+      taskId: 'bash-aaaaaaaa',
+      info: info(),
+      output: makeOutput(100),
+      onClose: () => {},
+      reverseOrder: false,
+    });
+    const out = strip(viewer.render(120).join('\n'));
+    expect(out).toContain('line-001');
+    expect(out).not.toContain('line-100');
   });
 });

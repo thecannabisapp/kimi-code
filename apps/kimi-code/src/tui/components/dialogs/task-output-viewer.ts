@@ -7,11 +7,19 @@
  * Mounted by `kimi-tui.ts` via nested container swap on top of the
  * TasksBrowserApp. Snapshot view (no live tail) — content is fetched
  * once when the viewer opens.
+ *
+ * The body is rendered through pi-tui's `Markdown` component using the
+ * same theme as assistant messages, so markdown/ANSI formatting, code
+ * blocks, and line wrapping all behave consistently with the rest of
+ * the transcript. By default the line order is reversed so the most
+ * recent output appears at the top of the body; pass `reverseOrder:
+ * false` to keep oldest-first order.
  */
 
 import {
   Container,
   Key,
+  Markdown,
   matchesKey,
   type Terminal,
   truncateToWidth,
@@ -21,15 +29,19 @@ import {
 import type { BackgroundTaskInfo, BackgroundTaskStatus } from '@moonshot-ai/kimi-code-sdk';
 
 import { currentTheme } from '#/tui/theme';
+import { createMarkdownTheme } from '#/tui/theme/pi-tui-theme';
 import { printableChar } from '@/tui/utils/printable-key';
 
 const ELLIPSIS = '…';
+const EMPTY_OUTPUT = '[no output captured]';
 
 export interface TaskOutputViewerProps {
   readonly taskId: string;
   readonly info: BackgroundTaskInfo | undefined;
   readonly output: string;
   readonly onClose: () => void;
+  /** Reverse the line order so newest output is at the top. Defaults to true. */
+  readonly reverseOrder?: boolean;
 }
 
 const STATUS_LABEL: Record<BackgroundTaskStatus, string> = {
@@ -75,36 +87,68 @@ export class TaskOutputViewer extends Container implements Focusable {
   private readonly terminal: Terminal;
   /** Output split on '\n'. Replaced on `setProps` when `output` changes. */
   private lines: string[];
-  /** Index of the topmost visible line. */
+  /** Topmost visible wrapped display line. In reversed mode 0 == newest output. */
   private scrollTop = 0;
+  /** Markdown renderer; rebuilt on theme changes via `invalidate()`. */
+  private readonly markdown: Markdown;
+  /** Cache of the last rendered body slice to avoid re-parsing Markdown each frame. */
+  private cachedBodyWidth = 0;
+  private cachedBodyLines: string[] | undefined;
 
   constructor(props: TaskOutputViewerProps, terminal: Terminal) {
     super();
     this.props = props;
     this.terminal = terminal;
     this.lines = this.splitOutput(props.output);
+    this.markdown = new Markdown(
+      this.buildMarkdownText(),
+      0,
+      0,
+      createMarkdownTheme(),
+      { color: (text) => currentTheme.fg('text', text) },
+    );
   }
 
   /**
    * Update viewer props. When `output` grows (the watched task wrote
-   * new content), follow the tail like `less +F` if the user is parked
-   * at the bottom; otherwise keep the user's current scroll position
-   * so they can read history without being yanked around.
+   * new content), keep the user at the top in reversed mode so the
+   * latest output stays visible; in oldest-first mode follow the tail
+   * like `less +F`. Otherwise preserve the user's scroll position and
+   * clamp it to the new bounds.
    */
   setProps(next: TaskOutputViewerProps): void {
     const previousOutput = this.props.output;
+    const previousReverse = this.reverseOrder();
+    const wasAtTop = this.scrollTop === 0;
     const wasAtBottom = this.scrollTop >= this.maxScroll();
     this.props = next;
-    if (next.output !== previousOutput) {
+
+    if (next.output !== previousOutput || previousReverse !== this.reverseOrder()) {
       this.lines = this.splitOutput(next.output);
-      if (wasAtBottom) this.scrollTop = this.maxScroll();
-      else this.scrollTop = Math.min(this.scrollTop, this.maxScroll());
+      this.markdown.setText(this.buildMarkdownText());
+      this.cachedBodyLines = undefined;
+
+      if (this.reverseOrder()) {
+        this.scrollTop = wasAtTop ? 0 : Math.min(this.scrollTop, this.maxScroll());
+      } else {
+        this.scrollTop = wasAtBottom ? this.maxScroll() : Math.min(this.scrollTop, this.maxScroll());
+      }
     }
     this.invalidate();
   }
 
+  private reverseOrder(): boolean {
+    return this.props.reverseOrder ?? true;
+  }
+
   private splitOutput(output: string): string[] {
-    return (output.length > 0 ? output : '[no output captured]').split('\n');
+    return output.length > 0 ? output.split('\n') : [];
+  }
+
+  private buildMarkdownText(): string {
+    if (this.lines.length === 0) return EMPTY_OUTPUT;
+    if (this.reverseOrder()) return this.lines.toReversed().join('\n');
+    return this.lines.join('\n');
   }
 
   // ── input ──────────────────────────────────────────────────────────
@@ -117,6 +161,11 @@ export class TaskOutputViewer extends Container implements Focusable {
       this.props.onClose();
       return;
     }
+    // Scroll keys move the viewport, not the logical buffer: Up scrolls toward
+    // the top of the screen and Down toward the bottom. In reversed mode that
+    // reveals newer / older output respectively; in oldest-first mode it is the
+    // opposite. This keeps the key mapping visually consistent with the rest of
+    // the TUI.
     if (matchesKey(data, Key.up) || k === 'k') {
       this.scrollBy(-1);
       return;
@@ -152,8 +201,9 @@ export class TaskOutputViewer extends Container implements Focusable {
     this.invalidate();
   }
 
-  private maxScroll(): number {
-    return Math.max(0, this.lines.length - this.viewableRows());
+  private maxScroll(innerWidth = Math.max(1, this.terminal.columns - 4)): number {
+    const bodyLines = this.getBodyLines(innerWidth);
+    return Math.max(0, bodyLines.length - this.viewableRows());
   }
 
   /**
@@ -165,6 +215,12 @@ export class TaskOutputViewer extends Container implements Focusable {
   }
 
   // ── render ─────────────────────────────────────────────────────────
+
+  override invalidate(): void {
+    this.cachedBodyLines = undefined;
+    this.markdown.invalidate();
+    super.invalidate();
+  }
 
   override render(width: number): string[] {
     const rows = Math.max(3, this.terminal.rows);
@@ -199,38 +255,49 @@ export class TaskOutputViewer extends Container implements Focusable {
   }
 
   private renderBody(width: number, bodyHeight: number): string[] {
-    // Reserve 1 col for left/right border each, 1 col for left padding.
+    // Reserve 1 col for left/right border each, 1 col for left/right padding.
     const innerWidth = Math.max(1, width - 4);
+    const viewRows = Math.max(1, bodyHeight - 2);
 
     // Re-clamp scroll in case the terminal got resized smaller.
-    const max = this.maxScroll();
-    if (this.scrollTop > max) this.scrollTop = max;
-    if (this.scrollTop < 0) this.scrollTop = 0;
+    this.scrollTop = Math.min(this.scrollTop, this.maxScroll(innerWidth));
 
-    const viewRows = bodyHeight - 2; // inside top + bottom border
     const top = currentTheme.fg('primary', '┌' + '─'.repeat(Math.max(0, width - 2)) + '┐');
     const bottom = currentTheme.fg('primary', '└' + '─'.repeat(Math.max(0, width - 2)) + '┘');
 
+    const bodyLines = this.getBodyLines(innerWidth);
+    const visibleLines = bodyLines.slice(this.scrollTop, this.scrollTop + viewRows);
+
     const out: string[] = [top];
-    for (let i = 0; i < viewRows; i++) {
-      const lineIndex = this.scrollTop + i;
-      const raw = this.lines[lineIndex] ?? '';
-      const inner = fitExactly(currentTheme.fg('text', raw), innerWidth);
-      out.push(currentTheme.fg('primary', '│ ') + inner + currentTheme.fg('primary', ' │'));
+    for (const raw of visibleLines) {
+      out.push(currentTheme.fg('primary', '│ ') + raw + currentTheme.fg('primary', ' │'));
+    }
+    for (let i = visibleLines.length; i < viewRows; i++) {
+      out.push(currentTheme.fg('primary', '│ ') + ' '.repeat(innerWidth) + currentTheme.fg('primary', ' │'));
     }
     out.push(bottom);
     return out;
+  }
+
+  private getBodyLines(innerWidth: number): string[] {
+    if (this.cachedBodyLines !== undefined && this.cachedBodyWidth === innerWidth) {
+      return this.cachedBodyLines;
+    }
+    this.cachedBodyLines = this.markdown.render(innerWidth);
+    this.cachedBodyWidth = innerWidth;
+    return this.cachedBodyLines;
   }
 
   private renderFooter(width: number, bodyHeight: number): string {
     const key = (text: string): string => currentTheme.boldFg('primary', text);
     const dim = (text: string): string => currentTheme.fg('textMuted', text);
 
-    const total = this.lines.length;
+    const innerWidth = Math.max(1, width - 4);
+    const bodyLines = this.getBodyLines(innerWidth);
+    const total = bodyLines.length;
     const viewRows = Math.max(1, bodyHeight - 2);
     const maxScroll = Math.max(0, total - viewRows);
-    const percent =
-      maxScroll === 0 ? 100 : Math.round((this.scrollTop / maxScroll) * 100);
+    const percent = maxScroll === 0 ? 100 : Math.round((this.scrollTop / maxScroll) * 100);
     const lineFrom = this.scrollTop + 1;
     const lineTo = Math.min(total, this.scrollTop + viewRows);
 
