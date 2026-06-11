@@ -233,6 +233,7 @@ export class AgentTool implements BuiltinTool<AgentToolInput> {
               abort: () => {
                 backgroundController?.abort();
               },
+              eventSource: handle.subscribeToEvents,
             }),
           );
         } catch (error) {

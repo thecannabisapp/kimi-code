@@ -1452,7 +1452,6 @@ function fakeSession(
     agents.set('agent-0', child);
   }
   return {
-    options: {},
     agents,
     options: { kimiHomeDir: undefined },
     metadata: {

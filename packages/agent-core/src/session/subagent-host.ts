@@ -21,6 +21,7 @@ import {
 } from '../utils/abort';
 import { collectGitContext } from './git-context';
 import type { Session } from './index';
+import type { AgentEvent } from '#/rpc';
 import {
   SubagentBatch,
   type SubagentResult,
@@ -94,6 +95,7 @@ export type SubagentHandle = {
   readonly profileName: string;
   readonly resumed: boolean;
   readonly completion: Promise<SubagentCompletion>;
+  readonly subscribeToEvents?: ((callback: (event: AgentEvent) => void) => (() => void)) | undefined;
 };
 
 export class SessionSubagentHost {
@@ -119,6 +121,7 @@ export class SessionSubagentHost {
       { type: 'sub', generate: parent.rawGenerate },
       { parentAgentId: this.ownerAgentId, swarmItem: options.swarmItem },
     );
+    const subscribeToEvents = this.wrapAgentEmitEvent(agent);
     const completion = this.runWithActiveChild(id, options, async (runOptions) => {
       this.emitSubagentSpawned(parent, id, profile.name, runOptions);
       try {
@@ -134,12 +137,14 @@ export class SessionSubagentHost {
       profileName: profile.name,
       resumed: false,
       completion,
+      subscribeToEvents,
     };
   }
 
   async resume(agentId: string, options: RunSubagentOptions): Promise<SubagentHandle> {
     options.signal.throwIfAborted();
     const { parent, child, profileName } = await this.ensureIdleSubagent(agentId);
+    const subscribeToEvents = this.wrapAgentEmitEvent(child);
     const completion = this.runWithActiveChild(agentId, options, async (runOptions) => {
       this.emitSubagentSpawned(parent, agentId, profileName, runOptions);
       try {
@@ -150,7 +155,7 @@ export class SessionSubagentHost {
         throw error;
       }
     });
-    return { agentId, profileName, resumed: true, completion };
+    return { agentId, profileName, resumed: true, completion, subscribeToEvents };
   }
 
   async retry(agentId: string, options: RunSubagentOptions): Promise<SubagentHandle> {
@@ -173,6 +178,29 @@ export class SessionSubagentHost {
       }
     });
     return { agentId, profileName, resumed: true, completion };
+  }
+
+  private wrapAgentEmitEvent(
+    agent: Agent,
+  ): (callback: (event: AgentEvent) => void) => (() => void) {
+    const callbacks = new Set<(event: AgentEvent) => void>();
+    const originalEmitEvent = agent.emitEvent.bind(agent);
+    agent.emitEvent = (event: AgentEvent): void => {
+      originalEmitEvent(event);
+      for (const cb of callbacks) {
+        try {
+          cb(event);
+        } catch {
+          // best-effort: ignore individual callback failures
+        }
+      }
+    };
+    return (cb) => {
+      callbacks.add(cb);
+      return () => {
+        callbacks.delete(cb);
+      };
+    };
   }
 
   private async ensureIdleSubagent(
