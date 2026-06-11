@@ -113,6 +113,9 @@ describe('goal session end-to-end', () => {
 
     await api.createGoal({ agentId: 'main', objective: 'Ship feature X' });
 
+    // Disable the continuation-turn delay so the test completes quickly.
+    agent.turn.goalContinuationMinIntervalMs = 0;
+
     // Turn 1 stops without deciding -> the driver runs a second turn. In turn 2
     // the model calls UpdateGoal('complete'), which clears the goal. The turn
     // then gives the model one final step to summarize how it finished.

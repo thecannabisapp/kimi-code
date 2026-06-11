@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 
-import { createControlledPromise, type ControlledPromise } from '@antfu/utils';
+import { createControlledPromise, sleep, type ControlledPromise } from '@antfu/utils';
 import {
   APIConnectionError,
   APIContextOverflowError,
@@ -95,9 +95,18 @@ const GOAL_CONTINUATION_PROMPT = [
   'user input prevents progress, or the objective cannot be completed as stated, call UpdateGoal',
   'with `blocked`. Otherwise keep going — use the existing conversation context and your tools,',
   'and do not ask the user for input unless a real blocker prevents progress.',
+  'If you are waiting for background tasks or subagents to finish, do not poll them with',
+  'TaskList. Rely on automatic completion notifications, or use TaskOutput(block=true) with a',
+  'reasonable timeout instead of looping.',
 ].join(' ');
 
+/** Default minimum wall-clock time between goal continuation turns. Prevents rapid-fire */
+/** token burn when the model has no substantive work to do (e.g. polling TaskList). */
+const DEFAULT_GOAL_CONTINUATION_MIN_INTERVAL_MS = 15_000;
+
 export class TurnFlow {
+  /** Minimum wall-clock time between goal continuation turns. Overridable in tests. */
+  goalContinuationMinIntervalMs = DEFAULT_GOAL_CONTINUATION_MIN_INTERVAL_MS;
   private steerBuffer: BufferedSteer[] = [];
   private turnId = -1;
   private activeTurn: 'resuming' | ActiveTurn | null = null;
@@ -357,6 +366,7 @@ export class TurnFlow {
       // Wall-clock is tracked live by the store (anchored while `active`), so the
       // timer is correct even when the model completes mid-turn.
       await this.agent.goal.incrementTurn();
+      const turnStartTime = Date.now();
       const end = await this.runOneTurn(turnId, turnInput, turnOrigin, signal, false);
 
       if (end.event.reason === 'cancelled') {
@@ -384,6 +394,14 @@ export class TurnFlow {
       if (goal.budget.overBudget) {
         await this.agent.goal.markBlocked({ reason: 'A configured budget was reached' });
         return end;
+      }
+
+      // Enforce a minimum interval between continuation turns so the model
+      // cannot burn tokens by polling TaskList in a tight loop.
+      const elapsed = Date.now() - turnStartTime;
+      const remaining = this.goalContinuationMinIntervalMs - elapsed;
+      if (remaining > 0) {
+        await sleep(remaining);
       }
 
       turnId = this.allocateTurnId();

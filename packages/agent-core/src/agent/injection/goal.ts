@@ -152,6 +152,11 @@ function buildGoalReminder(goal: GoalSnapshot): string {
       "Call UpdateGoal as soon as the goal is genuinely done or cannot proceed; don't keep going " +
       'once there is nothing left to do.',
   );
+  lines.push(
+    'If you are waiting for background tasks or subagents to finish, do not poll them with ' +
+      'TaskList. Rely on automatic completion notifications, or use TaskOutput(block=true) with a ' +
+      'reasonable timeout instead of looping.',
+  );
   return lines.join('\n');
 }
 
