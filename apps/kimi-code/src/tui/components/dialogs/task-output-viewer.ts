@@ -11,9 +11,9 @@
  * The body is rendered through pi-tui's `Markdown` component using the
  * same theme as assistant messages, so markdown/ANSI formatting, code
  * blocks, and line wrapping all behave consistently with the rest of
- * the transcript. By default the line order is reversed so the most
- * recent output appears at the top of the body; pass `reverseOrder:
- * false` to keep oldest-first order.
+ * the transcript. By default output is shown oldest-first with the
+ * latest lines at the bottom, matching the main transcript; pass
+ * `reverseOrder: true` to keep the newest output at the top.
  */
 
 import {
@@ -40,7 +40,7 @@ export interface TaskOutputViewerProps {
   readonly info: BackgroundTaskInfo | undefined;
   readonly output: string;
   readonly onClose: () => void;
-  /** Reverse the line order so newest output is at the top. Defaults to true. */
+  /** Reverse the line order so newest output is at the top. Defaults to false. */
   readonly reverseOrder?: boolean;
 }
 
@@ -107,14 +107,18 @@ export class TaskOutputViewer extends Container implements Focusable {
       createMarkdownTheme(),
       { color: (text) => currentTheme.fg('text', text) },
     );
+
+    // Start anchored at the bottom (latest output) in default oldest-first
+    // mode, matching the main transcript's scroll behaviour.
+    this.scrollTop = this.reverseOrder() ? 0 : this.maxScroll();
   }
 
   /**
    * Update viewer props. When `output` grows (the watched task wrote
    * new content), keep the user at the top in reversed mode so the
-   * latest output stays visible; in oldest-first mode follow the tail
-   * like `less +F`. Otherwise preserve the user's scroll position and
-   * clamp it to the new bounds.
+   * latest output stays visible; in default oldest-first mode follow
+   * the tail like `less +F`. Otherwise preserve the user's scroll
+   * position and clamp it to the new bounds.
    */
   setProps(next: TaskOutputViewerProps): void {
     const previousOutput = this.props.output;
@@ -138,7 +142,7 @@ export class TaskOutputViewer extends Container implements Focusable {
   }
 
   private reverseOrder(): boolean {
-    return this.props.reverseOrder ?? true;
+    return this.props.reverseOrder ?? false;
   }
 
   private splitOutput(output: string): string[] {
