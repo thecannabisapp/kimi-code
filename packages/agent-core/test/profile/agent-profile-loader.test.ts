@@ -9,6 +9,7 @@ import {
   loadAgentProfilesFromDir,
   loadAgentProfilesFromSources,
   resolveAgentProfiles,
+  loadCustomAgentProfiles,
   type SystemPromptContext,
 } from '../../src/profile';
 import { SkillRegistry, type SkillDefinition } from '../../src/skill';
@@ -150,6 +151,19 @@ tools:
         'profile/default/agent.yaml': 'name: agent\nsystemPromptPath: ./missing.md\n',
       }),
     ).toThrow(/Embedded agent profile source missing: profile\/default\/missing\.md/);
+  });
+
+  it('loads custom agent profiles and subagent overrides from a directory', async () => {
+    await write('agent.yaml', 'name: agent\nsystemPromptPath: ./system.md\n');
+    await write('system.md', 'custom system prompt');
+    await write('coder.yaml', 'extends: agent\nname: coder\nsystemPromptPath: ./coder_system.md\n');
+    await write('coder_system.md', 'custom coder prompt');
+
+    const { profiles } = await loadCustomAgentProfiles(workDir);
+
+    expect(profiles['agent']?.systemPrompt(promptContext)).toBe('custom system prompt');
+    expect(profiles['coder']?.systemPrompt(promptContext)).toBe('custom coder prompt');
+    expect(profiles['explore']?.systemPrompt(promptContext)).toBe('custom system prompt');
   });
 });
 

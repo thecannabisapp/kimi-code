@@ -8,21 +8,22 @@ import type { ResolvedAgentProfile } from './types';
 export async function loadCustomAgentProfiles(
   dir: string,
 ): Promise<{ profiles: Record<string, ResolvedAgentProfile>; initPrompt: string }> {
-  const entries = await readdir(dir);
+  const entries = await readdir(dir, { withFileTypes: true });
   const customSources: Record<string, string> = {};
   const customPaths: string[] = [];
 
-  for (const file of ['agent.yaml']) {
-    if (!entries.includes(file)) continue;
-    const content = await readFile(join(dir, file), 'utf-8');
-    const sourcePath = `profile/default/${file}`;
-    customSources[sourcePath] = content;
-    customPaths.push(sourcePath);
-  }
-
-  for (const file of ['system.md']) {
-    if (entries.includes(file)) {
-      customSources[`profile/default/${file}`] = await readFile(join(dir, file), 'utf-8');
+  for (const entry of entries) {
+    if (!entry.isFile()) continue;
+    const name = entry.name;
+    if (name.endsWith('.yaml')) {
+      const content = await readFile(join(dir, name), 'utf-8');
+      const sourcePath = `profile/default/${name}`;
+      customSources[sourcePath] = content;
+      customPaths.push(sourcePath);
+    } else if (name.endsWith('.md') && name !== 'init.md') {
+      const content = await readFile(join(dir, name), 'utf-8');
+      const sourcePath = `profile/default/${name}`;
+      customSources[sourcePath] = content;
     }
   }
 
@@ -32,7 +33,8 @@ export async function loadCustomAgentProfiles(
   const profiles = loadAgentProfilesFromSources(allPaths, mergedSources);
 
   let initPrompt = DEFAULT_INIT_PROMPT;
-  if (entries.includes('init.md')) {
+  const hasInit = entries.some((entry) => entry.isFile() && entry.name === 'init.md');
+  if (hasInit) {
     initPrompt = await readFile(join(dir, 'init.md'), 'utf-8');
   }
 
