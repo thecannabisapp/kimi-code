@@ -78,7 +78,7 @@ export function trimTrailingOpenToolExchange(history: readonly Message[]): Messa
   }
 
   const assistant = history[lastNonToolIndex];
-  if (assistant === undefined) return [];
+  if (assistant === undefined) return [...history];
   if (assistant.role !== 'assistant' || assistant.toolCalls.length === 0) return [...history];
 
   const trailingToolCallIds = new Set(
