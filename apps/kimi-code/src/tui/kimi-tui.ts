@@ -475,10 +475,10 @@ export class KimiTUI {
     try {
       const result = await this.authFlow.refreshProviderModels();
       for (const c of result.changed) {
-        const parts: string[] = [c.providerName];
-        if (c.added > 0) parts.push(`+${String(c.added)} model${c.added > 1 ? 's' : ''}`);
-        if (c.removed > 0) parts.push(`-${String(c.removed)} model${c.removed > 1 ? 's' : ''}`);
-        this.showStatus(parts.join(' · ') + '.');
+        if (c.added <= 0) continue;
+        this.showStatus(
+          `${c.providerName} · +${String(c.added)} model${c.added > 1 ? 's' : ''}.`,
+        );
       }
       for (const f of result.failed) {
         this.showStatus(`Skipped refreshing ${f.provider}: ${f.reason}`, 'warning');
@@ -588,14 +588,7 @@ export class KimiTUI {
         session = await this.harness.createSession(createSessionOptions);
       }
       if (session !== undefined && shouldReplayHistory) {
-        if (startup.auto) {
-          await session.setPermission('auto');
-        } else if (startup.yolo) {
-          await session.setPermission('yolo');
-        }
-        if (startup.plan) {
-          await session.setPlanMode(true);
-        }
+        await this.applyStartupModesToResumedSession(session);
         if (startup.model !== undefined) {
           await session.setModel(startup.model);
         }
@@ -1097,6 +1090,25 @@ export class KimiTUI {
     });
   }
 
+  // Apply --auto/--yolo/--plan startup flags to a resumed session. The resumed
+  // session may already be in plan mode from its persisted records, and
+  // re-entering plan mode throws, so only enable it when it is not active yet.
+  // setPermission is idempotent and needs no such guard.
+  private async applyStartupModesToResumedSession(session: Session): Promise<void> {
+    const { startup } = this.options;
+    if (startup.auto) {
+      await session.setPermission('auto');
+    } else if (startup.yolo) {
+      await session.setPermission('yolo');
+    }
+    if (startup.plan) {
+      const status = await session.getStatus();
+      if (!status.planMode) {
+        await session.setPlanMode(true);
+      }
+    }
+  }
+
   // Re-apply startup flags that the user explicitly passed on the command line.
   // syncRuntimeState and session-replay hydration can both read stale persisted
   // values, so this guarantees the footer reflects the CLI intent.
@@ -1312,6 +1324,19 @@ export class KimiTUI {
     this.sessionEventHandler.startSubscription();
     this.clearTranscriptAndRedraw();
     this.showStatus(`Started a new session (${session.id}).`);
+    void this.showConfigWarningsIfAny();
+  }
+
+  /** Surface config.toml load warnings (degraded or kept-previous config) in the status bar. */
+  private async showConfigWarningsIfAny(): Promise<void> {
+    try {
+      const { warnings } = await this.harness.getConfigDiagnostics();
+      for (const warning of warnings) {
+        this.showStatus(warning, 'warning');
+      }
+    } catch {
+      /* diagnostics are best-effort */
+    }
   }
 
   // =========================================================================
@@ -1709,6 +1734,7 @@ export class KimiTUI {
   }
 
   private syncTerminalProgress(active: boolean): void {
+    if (!this.state.terminalState.supportsProgress) return;
     if (this.state.terminalState.progressActive === active) return;
     this.state.terminal.setProgress(active);
     this.state.terminalState.progressActive = active;
@@ -1816,27 +1842,28 @@ export class KimiTUI {
 
   async showSessionPicker(): Promise<void> {
     await this.fetchSessions();
-    this.mountSessionPicker(() => {
-      this.hideSessionPicker();
+    this.mountSessionPicker({
+      onCancel: () => {
+        this.hideSessionPicker();
+      },
     });
   }
 
   private async bootstrapFromPicker(): Promise<void> {
     await this.fetchSessions();
-    this.mountSessionPicker(
-      () => {
+    this.mountSessionPicker({
+      applyStartupModes: true,
+      onCancel: () => {
         this.hideSessionPicker();
         void this.stop();
       },
-      {
-        onCtrlC: () => {
-          this.state.editor.onCtrlC?.();
-        },
-        onCtrlD: () => {
-          this.state.editor.onCtrlD?.();
-        },
+      onCtrlC: () => {
+        this.state.editor.onCtrlC?.();
       },
-    );
+      onCtrlD: () => {
+        this.state.editor.onCtrlD?.();
+      },
+    });
   }
 
   hideSessionPicker(): void {
@@ -1845,10 +1872,15 @@ export class KimiTUI {
     this.restoreEditor();
   }
 
-  private mountSessionPicker(
-    onCancel: () => void,
-    shortcuts: { readonly onCtrlC?: () => void; readonly onCtrlD?: () => void } = {},
-  ): void {
+  private mountSessionPicker(options: {
+    readonly onCancel: () => void;
+    readonly onCtrlC?: () => void;
+    readonly onCtrlD?: () => void;
+    // CLI mode flags (--auto/--yolo/--plan) target the session picked at
+    // startup (bare --session); later /sessions switches keep the picked
+    // session's own persisted modes.
+    readonly applyStartupModes?: boolean;
+  }): void {
     this.state.activeDialog = 'session-picker';
     this.mountEditorReplacement(
       new SessionPickerComponent({
@@ -1856,26 +1888,24 @@ export class KimiTUI {
         loading: this.state.loadingSessions,
         currentSessionId: this.state.appState.sessionId,
         onSelect: (sessionId: string) => {
-          void this.resumeSession(sessionId).then(async (switched) => {
-            if (!switched) {
-              return;
-            }
-            const session = this.requireSession();
-            if (this.options.startup.auto) {
-              await session.setPermission('auto');
-            } else if (this.options.startup.yolo) {
-              await session.setPermission('yolo');
-            }
-            if (this.options.startup.plan) {
-              await session.setPlanMode(true);
-            }
-            this.applyStartupPermissionAndPlanToAppState();
-            this.hideSessionPicker();
-          });
+          void this.resumeSession(sessionId)
+            .then(async (switched) => {
+              if (!switched) {
+                return;
+              }
+              if (options.applyStartupModes === true) {
+                await this.applyStartupModesToResumedSession(this.requireSession());
+                this.applyStartupPermissionAndPlanToAppState();
+              }
+              this.hideSessionPicker();
+            })
+            .catch((error) => {
+              this.showError(`Failed to apply startup flags: ${formatErrorMessage(error)}`);
+            });
         },
-        onCancel,
-        onCtrlC: shortcuts.onCtrlC,
-        onCtrlD: shortcuts.onCtrlD,
+        onCancel: options.onCancel,
+        onCtrlC: options.onCtrlC,
+        onCtrlD: options.onCtrlD,
       }),
     );
   }
