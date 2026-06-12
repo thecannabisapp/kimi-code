@@ -13,6 +13,8 @@ import type { BackgroundTaskInfo, BackgroundTaskStatus } from '@moonshot-ai/kimi
 
 import type { BackgroundAgentStatusData, BackgroundAgentStatusPhase } from '@/tui/types';
 
+import { currentTheme } from '#/tui/theme';
+
 const MAX_DETAIL_LENGTH = 240;
 
 function truncate(value: string | undefined): string | undefined {
@@ -103,4 +105,84 @@ export function formatBackgroundTaskTranscript(
     headline: headlineFor(info),
     detail: detailFor(info),
   };
+}
+
+/**
+ * Format a single line from a subagent background task's log stream
+ * to match the formatting/styling of the main agent transcript.
+ */
+export function formatSubagentLogLine(
+  line: string,
+  state: { inThinking: boolean },
+): string | undefined {
+  const trimmed = line.trim();
+  if (trimmed === '<thinking>') {
+    state.inThinking = true;
+    return currentTheme.dim('◌ ') + currentTheme.italicFg('textDim', 'Thinking...');
+  }
+  if (trimmed === '</thinking>') {
+    state.inThinking = false;
+    return undefined;
+  }
+  if (state.inThinking) {
+    return currentTheme.italicFg('textDim', line);
+  }
+
+  // Turn events
+  let match = /^\[turn (\d+) started\]$/.exec(line);
+  if (match) {
+    const turnId = match[1];
+    return currentTheme.fg('primary', '● ') + currentTheme.boldFg('textStrong', `Turn ${turnId} started`);
+  }
+
+  match = /^\[turn (\d+) ended: (.*)\]$/.exec(line);
+  if (match) {
+    const turnId = match[1];
+    const reason = match[2];
+    return currentTheme.fg('success', '● ') + currentTheme.fg('textMuted', `Turn ${turnId} ended: ${reason}`);
+  }
+
+  // Tool events
+  match = /^\[tool\] ([a-zA-Z0-9_\-\.]+)\((.*)\)$/.exec(line);
+  if (match) {
+    const name = match[1];
+    const args = match[2];
+    return (
+      currentTheme.dim('◌ ') +
+      'Using ' +
+      currentTheme.boldFg('primary', name) +
+      currentTheme.dim(`(${args})`)
+    );
+  }
+
+  match = /^\[result\] ([a-zA-Z0-9_\-\.:]+): (.*)$/.exec(line);
+  if (match) {
+    const preview = match[2];
+    return currentTheme.fg('success', '  • ') + currentTheme.dim(`Result: ${preview}`);
+  }
+
+  // Error events
+  match = /^\[error\] (.*)$/.exec(line);
+  if (match) {
+    const errorMsg = match[1];
+    return currentTheme.fg('error', '✗ ') + currentTheme.fg('error', errorMsg);
+  }
+
+  // Normal text / assistant response
+  return line;
+}
+
+/**
+ * Format a set of lines from a subagent background task's log stream.
+ */
+export function formatSubagentLogLines(lines: string[]): string[] {
+  const state = { inThinking: false };
+  const result: string[] = [];
+  for (const line of lines) {
+    const formatted = formatSubagentLogLine(line, state);
+    if (formatted !== undefined) {
+      result.push(formatted);
+    }
+  }
+  return result;
 }

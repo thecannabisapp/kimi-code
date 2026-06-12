@@ -132,6 +132,26 @@ describe('TaskOutputViewer — rendering', () => {
     expect(strip(out)).toContain('bold');
     expect(strip(out)).toContain('code');
   });
+
+  it('formats subagent log events for agent tasks', () => {
+    const output = '[turn 1 started]\n[tool] read_file({"path":"foo.txt"})\n[result] call_abc: ok\n<thinking>\nchecking file\n</thinking>\n[turn 1 ended: success]\nFinished task!';
+    const out = strip(
+      makeViewer({
+        output,
+        taskInfo: info({ kind: 'agent', taskId: 'agent-bbbbbbbb' }),
+        rows: 20,
+      })
+        .render(120)
+        .join('\n'),
+    );
+    expect(out).toContain('Turn 1 started');
+    expect(out).toContain('Using read_file');
+    expect(out).toContain('Result: ok');
+    expect(out).toContain('Thinking...');
+    expect(out).toContain('checking file');
+    expect(out).toContain('Turn 1 ended: success');
+    expect(out).toContain('Finished task!');
+  });
 });
 
 describe('TaskOutputViewer — scrolling (oldest-first default)', () => {

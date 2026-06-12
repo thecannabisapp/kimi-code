@@ -31,6 +31,7 @@ import type { BackgroundTaskInfo, BackgroundTaskStatus } from '@moonshot-ai/kimi
 import { currentTheme } from '#/tui/theme';
 import { createMarkdownTheme } from '#/tui/theme/pi-tui-theme';
 import { printableChar } from '@/tui/utils/printable-key';
+import { formatSubagentLogLines } from '@/tui/utils/background-task-status';
 
 const ELLIPSIS = '…';
 const EMPTY_OUTPUT = '[no output captured]';
@@ -146,7 +147,11 @@ export class TaskOutputViewer extends Container implements Focusable {
   }
 
   private splitOutput(output: string): string[] {
-    return output.length > 0 ? output.split('\n') : [];
+    const rawLines = output.length > 0 ? output.split('\n') : [];
+    if (this.props?.info?.kind === 'agent' || this.props?.taskId.startsWith('agent')) {
+      return formatSubagentLogLines(rawLines);
+    }
+    return rawLines;
   }
 
   private buildMarkdownText(): string {
