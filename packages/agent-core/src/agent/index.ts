@@ -301,6 +301,7 @@ export class Agent {
     await this.background.reconcile();
     await this.cron?.loadFromDisk();
     this.turn.finishResume();
+    this.context.clearPendingToolResultIds();
     return result;
   }
 

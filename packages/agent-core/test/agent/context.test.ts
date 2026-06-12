@@ -809,6 +809,43 @@ describe('Agent context notification projection', () => {
       { role: 'user', content: [{ type: 'text', text: 'hello' }], toolCalls: [] }
     ]);
   });
+
+  it('trims open tool calls followed by user message', () => {
+    const ctx = testAgent();
+    ctx.configure();
+
+    ctx.agent.context.appendUserMessage([{ type: 'text', text: 'first prompt' }]);
+    ctx.dispatch({
+      type: 'context.append_loop_event',
+      event: { type: 'step.begin', uuid: 'origin-step', turnId: '', step: 1 },
+    });
+    ctx.dispatch({
+      type: 'context.append_loop_event',
+      event: {
+        type: 'tool.call',
+        uuid: 'call_1',
+        stepUuid: 'origin-step',
+        toolCallId: 'call_1',
+        name: 'Bash',
+        args: { command: 'echo 1' },
+      },
+    });
+    ctx.dispatch({
+      type: 'context.append_loop_event',
+      event: { type: 'step.end', uuid: 'origin-step', turnId: '', step: 1 },
+    });
+
+    // Append a new user message afterwards
+    ctx.agent.context.clearPendingToolResultIds();
+    ctx.agent.context.appendUserMessage([{ type: 'text', text: 'second prompt' }]);
+
+    // The tool call does not have a tool.result yet, and is followed by the new user message.
+    // Both the assistant message and the open tool call must be cleaned/trimmed.
+    expect(trimTrailingOpenToolExchange(ctx.agent.context.messages)).toMatchObject([
+      { role: 'user', content: [{ type: 'text', text: 'first prompt' }] },
+      { role: 'user', content: [{ type: 'text', text: 'second prompt' }] }
+    ]);
+  });
 });
 
 function userMessage(text: string, origin?: ContextMessage['origin']): ContextMessage {

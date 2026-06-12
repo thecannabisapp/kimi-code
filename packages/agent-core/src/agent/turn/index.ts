@@ -447,6 +447,7 @@ export class TurnFlow {
     this.agent.fullCompaction.resetForTurn();
     this.agent.usage.beginTurn();
     this.agent.emitEvent({ type: 'turn.started', turnId, origin });
+    this.agent.context.clearPendingToolResultIds();
     this.agent.context.appendUserMessage(input, origin);
 
     const startedAt = Date.now();
@@ -536,6 +537,7 @@ export class TurnFlow {
     this.currentStepByTurn.delete(turnId);
     this.interruptedTelemetryTurnIds.delete(turnId);
     this.stepFailureByTurn.delete(turnId);
+    this.agent.context.clearPendingToolResultIds();
     return { event: ended, stopReason: completedStopReason, blockedByUserPromptHook };
   }
 

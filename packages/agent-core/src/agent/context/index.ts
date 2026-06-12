@@ -295,6 +295,11 @@ export class ContextMemory {
     this.pushHistory(message);
   }
 
+  clearPendingToolResultIds(): void {
+    this.pendingToolResultIds.clear();
+    this.flushDeferredMessagesIfToolExchangeClosed();
+  }
+
   private flushDeferredMessagesIfToolExchangeClosed(): void {
     if (this.pendingToolResultIds.size > 0 || this.deferredMessages.length === 0) {
       return;
