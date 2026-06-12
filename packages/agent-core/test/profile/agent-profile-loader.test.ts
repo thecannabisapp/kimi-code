@@ -158,12 +158,14 @@ tools:
     await write('system.md', 'custom system prompt');
     await write('coder.yaml', 'extends: agent\nname: coder\nsystemPromptPath: ./coder_system.md\n');
     await write('coder_system.md', 'custom coder prompt');
+    await write('main-agent.yaml', 'name: agent\nlegacy: true\n');
 
     const { profiles } = await loadCustomAgentProfiles(workDir);
 
     expect(profiles['agent']?.systemPrompt(promptContext)).toBe('custom system prompt');
     expect(profiles['coder']?.systemPrompt(promptContext)).toBe('custom coder prompt');
     expect(profiles['explore']?.systemPrompt(promptContext)).toBe('custom system prompt');
+    expect(profiles['main-agent']).toBeUndefined();
   });
 });
 

@@ -16,6 +16,8 @@ export async function loadCustomAgentProfiles(
     if (!entry.isFile()) continue;
     const name = entry.name;
     if (name.endsWith('.yaml')) {
+      const baseName = name.slice(0, -5);
+      if (!['agent', 'coder', 'explore', 'plan'].includes(baseName)) continue;
       const content = await readFile(join(dir, name), 'utf-8');
       const sourcePath = `profile/default/${name}`;
       customSources[sourcePath] = content;
