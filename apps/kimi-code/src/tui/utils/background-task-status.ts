@@ -143,9 +143,9 @@ export function formatSubagentLogLine(
   }
 
   // Tool events
-  match = /^\[tool\] ([a-zA-Z0-9_\-\.]+)\((.*)\)$/.exec(line);
+  match = /^\[tool\] ([a-zA-Z0-9_.-]+)\((.*)\)$/.exec(line);
   if (match) {
-    const name = match[1];
+    const name = match[1] ?? '';
     const args = match[2];
     return (
       currentTheme.dim('◌ ') +
@@ -155,7 +155,7 @@ export function formatSubagentLogLine(
     );
   }
 
-  match = /^\[result\] ([a-zA-Z0-9_\-\.:]+): (.*)$/.exec(line);
+  match = /^\[result\] ([a-zA-Z0-9_.:-]+): (.*)$/.exec(line);
   if (match) {
     const preview = match[2];
     return currentTheme.fg('success', '  • ') + currentTheme.dim(`Result: ${preview}`);
@@ -164,7 +164,7 @@ export function formatSubagentLogLine(
   // Error events
   match = /^\[error\] (.*)$/.exec(line);
   if (match) {
-    const errorMsg = match[1];
+    const errorMsg = match[1] ?? '';
     return currentTheme.fg('error', '✗ ') + currentTheme.fg('error', errorMsg);
   }
 
