@@ -2,8 +2,6 @@ import type {
   BackgroundTaskInfo,
   Event,
 } from '@moonshot-ai/kimi-code-sdk';
-import type { Component } from '@earendil-works/pi-tui';
-
 import {
   AgentSwarmProgressComponent,
   agentSwarmDescriptionFromArgs,
@@ -37,18 +35,6 @@ export interface SubAgentEventHandlerDependencies {
   readonly backgroundTasks: ReadonlyMap<string, BackgroundTaskInfo>;
   readonly backgroundTaskTranscriptedTerminal: Set<string>;
   readonly syncBackgroundAgentBadge: () => void;
-}
-
-function renderedRowsAfterChild(
-  children: readonly Component[],
-  child: Component,
-  width: number,
-): number {
-  const childIndex = children.indexOf(child);
-  if (childIndex < 0) return 0;
-  return children
-    .slice(childIndex + 1)
-    .reduce((sum, component) => sum + component.render(width).length, 0);
 }
 
 export class SubAgentEventHandler {
@@ -567,12 +553,8 @@ export class SubAgentEventHandler {
     }
 
     const width = Math.floor(terminalColumns);
-    const rowsAfterSwarm = renderedRowsAfterChild(
-      state.ui.children,
-      state.transcriptContainer,
-      width,
-    );
-    return agentSwarmGridHeightForTerminalRows(terminalRows, rowsAfterSwarm);
+    const chromeRows = state.chromeContainer.render(width).length;
+    return agentSwarmGridHeightForTerminalRows(terminalRows, chromeRows);
   }
 
   private markAgentSwarmFailedOrCancelled(

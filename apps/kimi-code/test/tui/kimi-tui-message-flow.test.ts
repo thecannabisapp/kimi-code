@@ -1646,9 +1646,9 @@ command = "vim"
 
     const transcript = stripSgr(renderTranscript(driver));
     const panel = stripSgr(renderBtwPanel(driver));
-    const rootChildren = driver.state.ui.children;
-    expect(rootChildren.indexOf(driver.state.btwPanelContainer)).toBe(
-      rootChildren.indexOf(driver.state.editorContainer) - 1,
+    const chromeChildren = driver.state.chromeContainer.children;
+    expect(chromeChildren.indexOf(driver.state.btwPanelContainer)).toBe(
+      chromeChildren.indexOf(driver.state.editorContainer) - 1,
     );
     expect(transcript).toContain('main answer after btw');
     expect(transcript).not.toContain('side answer');
@@ -2627,11 +2627,9 @@ command = "vim"
     const sendQueued = vi.fn();
     const terminalColumns = 80;
     setTerminalColumns(driver, terminalColumns);
-    const outerChildren = driver.state.ui.children;
-    const transcriptIndex = outerChildren.indexOf(driver.state.transcriptContainer);
-    const rowsAfterTranscript = outerChildren
-      .slice(transcriptIndex + 1)
-      .reduce((sum, child) => sum + child.render(terminalColumns).length, 0);
+    const rowsAfterTranscript = driver.state.chromeContainer
+      .render(terminalColumns)
+      .length;
     const nonGridRows = 20 - (agentSwarmGridHeightForTerminalRows(20) ?? 0);
     setTerminalRows(driver, rowsAfterTranscript + nonGridRows + 2);
 

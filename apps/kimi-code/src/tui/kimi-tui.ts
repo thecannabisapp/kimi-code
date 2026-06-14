@@ -42,7 +42,6 @@ import {
 import * as slashCommands from './commands/dispatch';
 import { BannerComponent } from './components/chrome/banner';
 import { DeviceCodeBoxComponent } from './components/chrome/device-code-box';
-import { GutterContainer } from './components/chrome/gutter-container';
 import { MoonLoader, type SpinnerStyle } from './components/chrome/moon-loader';
 import { WelcomeComponent } from './components/chrome/welcome';
 import {
@@ -86,7 +85,6 @@ import {
   NO_ACTIVE_SESSION_MESSAGE,
   PRODUCT_NAME,
 } from './constant/kimi-tui';
-import { CHROME_GUTTER } from './constant/rendering';
 import { MAX_TERMINAL_TITLE_LENGTH } from './constant/terminal';
 import { AuthFlowController } from './controllers/auth-flow';
 import { BtwPanelController } from './controllers/btw-panel';
@@ -195,6 +193,12 @@ interface SendMessageOptions {
   readonly hasMedia?: boolean;
 }
 
+const MOUSE_EVENT_RE = /^\u001B\[(?:<\d+;\d+;\d+[Mm]|M[\s\S]{3})$/;
+
+function isMouseEventSequence(data: string): boolean {
+  return MOUSE_EVENT_RE.test(data);
+}
+
 export class KimiTUI {
   readonly harness: KimiHarness;
   readonly options: KimiTUIOptions;
@@ -217,6 +221,8 @@ export class KimiTUI {
   private uninstallRainbowDance: () => void;
   private signalCleanupHandlers: Array<() => void> = [];
   private isShuttingDown = false;
+  private alternateScreenActive = false;
+  private mouseInputDispose: (() => void) | undefined;
   private readonly migrationPlan: MigrationPlan | null;
   private readonly migrateOnly: boolean;
   private startupNotice: string | undefined;
@@ -241,6 +247,7 @@ export class KimiTUI {
         component: ApprovalPreviewViewer;
         savedChildren: readonly Component[];
         panel: ApprovalPanelComponent;
+        chromeWasHidden: boolean;
       }
     | undefined;
 
@@ -371,12 +378,15 @@ export class KimiTUI {
       if (this.migrationPlan !== null) {
         // Migration needs the event loop running first (pi-tui component).
         this.startEventLoop();
+        // The migration screen replaces the editor inside the chrome overlay,
+        // so the overlay must be visible before the screen is mounted.
+        this.mountChromeOverlay();
         try {
           const migrationResult = await this.runMigrationScreen(this.migrationPlan);
           if (this.migrateOnly) {
             const failed = migrationResult.decision === 'now' && migrationResult.migrated === false;
             this.disposeTerminalTracking();
-            this.state.ui.stop();
+            this.stopTUI();
             await this.onExit?.(failed ? 1 : 0);
             return;
           }
@@ -385,7 +395,7 @@ export class KimiTUI {
           await this.finishStartup(shouldReplayHistory);
         } catch (error) {
           this.disposeTerminalTracking();
-          this.state.ui.stop();
+          this.stopTUI();
           throw error;
         }
         return;
@@ -398,7 +408,7 @@ export class KimiTUI {
         await this.finishStartup(shouldReplayHistory);
       } catch (error) {
         this.disposeTerminalTracking();
-        this.state.ui.stop();
+        this.stopTUI();
         throw error;
       }
     } catch (error) {
@@ -438,22 +448,50 @@ export class KimiTUI {
   private async initMainTui(): Promise<boolean> {
     const shouldReplayHistory = await this.init();
 
-    // Mount only after init() succeeds; see mountFooter().
-    this.mountFooter();
+    // Mount chrome only after init() succeeds so a stray pre-start render
+    // cannot leak the footer/editor above error screens.
+    this.mountChromeOverlay();
     this.renderWelcome();
     void this.loadBanner();
     this.setupAutocomplete();
     void this.loadPersistedInputHistory();
-    this.state.editorContainer.clear();
-    this.state.editorContainer.addChild(this.state.editor);
-    this.state.ui.setFocus(this.state.editor);
     return shouldReplayHistory;
   }
 
   private startEventLoop(): void {
+    this.enterAlternateScreen();
     this.state.ui.start();
+    this.mouseInputDispose = this.state.ui.addInputListener((data) => {
+      // Consume mouse event sequences so the wheel does not get translated
+      // into arrow keys and navigate the editor's input history.
+      if (isMouseEventSequence(data)) {
+        return { consume: true };
+      }
+      return undefined;
+    });
     this.terminalFocusTrackingDispose = installTerminalFocusTracking(this.state);
     this.refreshTerminalThemeTracking();
+  }
+
+  private enterAlternateScreen(): void {
+    if (this.alternateScreenActive) return;
+    this.alternateScreenActive = true;
+    // Enter alternate screen and enable basic mouse tracking so the terminal
+    // sends mouse events instead of translating wheel scroll into arrow keys.
+    process.stdout.write('\u001B[?1049h\u001B[?1000h');
+  }
+
+  private exitAlternateScreen(): void {
+    if (!this.alternateScreenActive) return;
+    this.alternateScreenActive = false;
+    process.stdout.write('\u001B[?1000l\u001B[?1049l');
+  }
+
+  private stopTUI(): void {
+    this.mouseInputDispose?.();
+    this.mouseInputDispose = undefined;
+    this.state.ui.stop();
+    this.exitAlternateScreen();
   }
 
   private startBackgroundFdAutocomplete(): void {
@@ -556,7 +594,7 @@ export class KimiTUI {
             throw new Error(`Session "${startup.sessionFlag}" not found.`);
           }
           if (resolve(target.workDir) !== resolve(workDir)) {
-            this.state.ui.stop();
+            this.stopTUI();
             process.stderr.write(
               `${currentTheme.fg(
                 'warning',
@@ -626,7 +664,7 @@ export class KimiTUI {
     this.sessionEventHandler.stopAllMcpServerStatusSpinners();
     this.uninstallRainbowDance();
     await this.state.terminal.drainInput();
-    this.state.ui.stop();
+    this.stopTUI();
     if (this.onExit) {
       await this.onExit(exitCode);
     }
@@ -690,6 +728,15 @@ export class KimiTUI {
   private emergencyTerminalExit(exitCode = 129): never {
     this.isShuttingDown = true;
     this.unregisterSignalHandlers();
+    this.exitAlternateScreen();
+    // Best-effort: terminate any child processes in our process group so
+    // background tasks (e.g., firebase emulator spawned by playwright) do not
+    // outlive a terminal close / SIGHUP.
+    try {
+      process.kill(-process.pid, 'SIGTERM');
+    } catch {
+      // Ignore errors such as EPERM or the process not being a group leader.
+    }
     process.exit(exitCode);
   }
 
@@ -702,24 +749,24 @@ export class KimiTUI {
   private buildLayout(): void {
     const { ui } = this.state;
     ui.clear();
-    ui.addChild(this.state.transcriptContainer);
-    ui.addChild(this.state.activityContainer);
-    ui.addChild(this.state.todoPanelContainer);
-    ui.addChild(this.state.queueContainer);
-    ui.addChild(this.state.btwPanelContainer);
-    ui.addChild(this.state.editorContainer);
-    // Footer is mounted later (mountFooter), not here.
+    ui.addChild(this.state.transcriptWrapper);
   }
 
-  // Footer is the only chrome with content before a session is ready, so
-  // mounting it at construction lets a stray pre-start render leak it to the
-  // terminal — e.g. above the error when resuming a missing session. Mount it
-  // only once init() succeeds. FooterComponent isn't a Container, so wrap it to
-  // pick up the same outer gutter as the panels above.
-  private mountFooter(): void {
-    const footerWrap = new GutterContainer(CHROME_GUTTER, CHROME_GUTTER);
-    footerWrap.addChild(this.state.footer);
-    this.state.ui.addChild(footerWrap);
+  // Chrome (activity pane, todo list, queue, BTW panel, editor, footer) lives
+  // in a single bottom-aligned pi-tui overlay so it is not part of the
+  // scrolling transcript buffer. This prevents duplicate-frame artifacts when
+  // background-task badge updates or streamed output shift the viewport.
+  private mountChromeOverlay(): void {
+    if (this.state.chromeOverlay !== undefined) return;
+    // No maxHeight: the overlay uses its natural height. When the slash-menu
+    // opens, the chrome block grows upward; this avoids arbitrary clipping or
+    // reserving rows that are usually empty.
+    this.state.chromeOverlay = this.state.ui.showOverlay(this.state.chromeContainer, {
+      anchor: 'bottom-left',
+      width: '100%',
+      nonCapturing: true,
+    });
+    this.state.ui.setFocus(this.state.editor);
   }
 
   // =========================================================================
@@ -1948,6 +1995,10 @@ export class KimiTUI {
   // kept around in `activeApprovalPanel` so its selection state survives.
   private openApprovalPreview(panel: ApprovalPanelComponent, block: ApprovalPreviewBlock): void {
     if (this.approvalPreview !== undefined) return;
+    const chromeOverlay = this.state.chromeOverlay;
+    if (chromeOverlay === undefined) return;
+    const chromeWasHidden = chromeOverlay.isHidden();
+    chromeOverlay.setHidden(true);
     const savedChildren = [...this.state.ui.children];
     const viewer = new ApprovalPreviewViewer(
       {
@@ -1962,7 +2013,7 @@ export class KimiTUI {
     this.state.ui.addChild(viewer);
     this.state.ui.setFocus(viewer);
     this.state.ui.requestRender(true);
-    this.approvalPreview = { component: viewer, savedChildren, panel };
+    this.approvalPreview = { component: viewer, savedChildren, panel, chromeWasHidden };
   }
 
   private closeApprovalPreview(): void {
@@ -1973,6 +2024,7 @@ export class KimiTUI {
     for (const child of preview.savedChildren) {
       this.state.ui.addChild(child);
     }
+    this.state.chromeOverlay?.setHidden(preview.chromeWasHidden);
     this.state.ui.setFocus(preview.panel);
     this.state.ui.requestRender(true);
   }

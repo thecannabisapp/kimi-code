@@ -1351,5 +1351,7 @@ function uiContainsFooter(driver: StartupDriver): boolean {
     const children = (node as { children?: unknown[] }).children;
     return Array.isArray(children) && children.some(visit);
   };
-  return visit(driver.state.ui);
+  const overlay = driver.state.chromeOverlay;
+  if (overlay === undefined || overlay.isHidden()) return false;
+  return visit(driver.state.chromeContainer);
 }
