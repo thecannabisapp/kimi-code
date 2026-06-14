@@ -880,7 +880,7 @@ describe('FullCompaction', () => {
         user: text "old user one"
         assistant: text "old assistant one"
         user: text "run both tools"
-        assistant: []  calls call_open_one:LookupOne { "query": "one" }, call_open_two:LookupTwo { "query": "two" }
+        assistant: []  calls call_open_one:LookupOne { "query": "one" }
         tool[call_open_one]: text "one result"
         user: text <compaction-instruction>
     `);

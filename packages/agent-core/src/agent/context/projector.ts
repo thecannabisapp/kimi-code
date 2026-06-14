@@ -12,7 +12,10 @@ export function project(history: readonly ContextMessage[]): Message[] {
       !(message.role === 'assistant' && message.content.length === 0 && message.toolCalls.length === 0)
     );
   });
-  return mergeAdjacentUserMessages(usable);
+  // Trim orphan tool exchanges first so they do not block merging of the
+  // user messages that surround them.
+  const trimmed = trimOrphanToolExchanges(usable);
+  return mergeAdjacentUserMessages(trimmed).map(stripContextMetadata);
 }
 
 function mergeAdjacentUserMessages(history: readonly ContextMessage[]): Message[] {
@@ -71,30 +74,133 @@ function stripContextMetadata(message: ContextMessage): Message {
   };
 }
 
-export function trimTrailingOpenToolExchange(history: readonly Message[]): Message[] {
-  const respondedToolCallIds = new Set<string>();
-  for (const message of history) {
-    if (message.role === 'tool' && typeof message.toolCallId === 'string') {
-      respondedToolCallIds.add(message.toolCallId);
+type TrimmableMessage = {
+  role: string;
+  content: readonly { type: string }[];
+  toolCalls: readonly { id: string }[];
+  toolCallId?: string | undefined;
+};
+
+/**
+ * Remove assistant/tool exchanges whose tool_calls never received a matching
+ * tool result. Matching is positional: a result only answers calls belonging
+ * to the same assistant segment (up to the next assistant). This prevents
+ * false matches when providers reuse toolCallIds across turns.
+ */
+function trimOrphanToolExchanges<T extends TrimmableMessage>(history: readonly T[]): T[] {
+  type AssistantSegment = {
+    assistantIndex: number;
+    toolCallIds: readonly string[];
+    toolIndices: readonly number[];
+  };
+
+  const segments: AssistantSegment[] = [];
+  let currentAssistantIndex = -1;
+  let currentToolIndices: number[] = [];
+
+  for (let i = 0; i < history.length; i++) {
+    const message = history[i];
+    if (message === undefined) continue;
+
+    if (message.role === 'assistant') {
+      if (currentAssistantIndex !== -1) {
+        segments.push({
+          assistantIndex: currentAssistantIndex,
+          toolCallIds: history[currentAssistantIndex]!.toolCalls.map((tc) => tc.id),
+          toolIndices: currentToolIndices,
+        });
+      }
+      currentAssistantIndex = message.toolCalls.length > 0 ? i : -1;
+      currentToolIndices = [];
+    } else if (message.role === 'tool' && currentAssistantIndex !== -1) {
+      currentToolIndices.push(i);
+    } else if (currentAssistantIndex !== -1) {
+      // A non-tool message ends the segment for the current assistant.
+      segments.push({
+        assistantIndex: currentAssistantIndex,
+        toolCallIds: history[currentAssistantIndex]!.toolCalls.map((tc) => tc.id),
+        toolIndices: currentToolIndices,
+      });
+      currentAssistantIndex = -1;
+      currentToolIndices = [];
     }
   }
 
-  const cleaned = history.map((message) => {
-    if (message.role === 'assistant' && message.toolCalls && message.toolCalls.length > 0) {
-      const toolCalls = message.toolCalls.filter((tc) => respondedToolCallIds.has(tc.id));
-      return {
-        ...message,
-        toolCalls,
-      };
-    }
-    return message;
-  });
+  if (currentAssistantIndex !== -1) {
+    segments.push({
+      assistantIndex: currentAssistantIndex,
+      toolCallIds: history[currentAssistantIndex]!.toolCalls.map((tc) => tc.id),
+      toolIndices: currentToolIndices,
+    });
+  }
 
-  return cleaned.filter((message) => {
+  const indicesToRemove = new Set<number>();
+  const assistantMutations = new Map<number, { toolCalls: T['toolCalls'] }>();
+
+  for (const segment of segments) {
+    const assistant = history[segment.assistantIndex];
+    if (assistant === undefined || assistant.toolCalls.length === 0) continue;
+
+    const respondedIds = new Set<string>();
+    for (const toolIndex of segment.toolIndices) {
+      const toolCallId = history[toolIndex]?.toolCallId;
+      if (typeof toolCallId === 'string') {
+        respondedIds.add(toolCallId);
+      }
+    }
+
+    const orphanIds = segment.toolCallIds.filter((id) => !respondedIds.has(id));
+    if (orphanIds.length === 0) continue;
+
+    const allOrphan = orphanIds.length === assistant.toolCalls.length;
+    if (allOrphan && assistant.content.length === 0) {
+      // The whole exchange is unanswered and the assistant has no other
+      // content; discard the assistant and every sibling tool message.
+      indicesToRemove.add(segment.assistantIndex);
+      for (const toolIndex of segment.toolIndices) {
+        indicesToRemove.add(toolIndex);
+      }
+      continue;
+    }
+
+    // Partial answer: keep the assistant's text but drop only the orphan
+    // tool_calls and their unmatched tool messages.
+    const keepIds = new Set(segment.toolCallIds.filter((id) => respondedIds.has(id)));
+    assistantMutations.set(segment.assistantIndex, {
+      toolCalls: assistant.toolCalls.filter((tc) => keepIds.has(tc.id)),
+    });
+    const orphanIdSet = new Set(orphanIds);
+    for (const toolIndex of segment.toolIndices) {
+      const toolCallId = history[toolIndex]?.toolCallId;
+      if (typeof toolCallId === 'string' && orphanIdSet.has(toolCallId)) {
+        indicesToRemove.add(toolIndex);
+      }
+    }
+  }
+
+  const out: T[] = [];
+  for (let i = 0; i < history.length; i++) {
+    if (indicesToRemove.has(i)) continue;
+    const mutation = assistantMutations.get(i);
+    if (mutation !== undefined) {
+      const message = history[i];
+      if (message !== undefined) {
+        out.push({ ...message, toolCalls: mutation.toolCalls });
+      }
+    } else {
+      out.push(history[i]!);
+    }
+  }
+
+  return out.filter((message) => {
     return !(
       message.role === 'assistant' &&
       message.content.length === 0 &&
       message.toolCalls.length === 0
     );
   });
+}
+
+export function trimTrailingOpenToolExchange(history: readonly Message[]): Message[] {
+  return trimOrphanToolExchanges(history);
 }

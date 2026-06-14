@@ -36,7 +36,7 @@ import {
 import type { AgentEvent, TurnEndedEvent } from '../../rpc';
 import type { TelemetryPropertyValue } from '../../telemetry';
 import { abortable, isUserCancellation, userCancellationReason } from '../../utils/abort';
-import { USER_PROMPT_ORIGIN, trimTrailingOpenToolExchange, type PromptOrigin } from '../context';
+import { USER_PROMPT_ORIGIN, type PromptOrigin } from '../context';
 import { renderUserPromptHookBlockResult, renderUserPromptHookResult } from '../../session/hooks';
 import { canonicalTelemetryArgs, isPlainRecord } from './canonical-args';
 import { ToolCallDeduplicator } from './tool-dedup';
@@ -610,7 +610,7 @@ export class TurnFlow {
           turnId: String(turnId),
           signal,
           llm: this.agent.llm,
-          buildMessages: () => trimTrailingOpenToolExchange(this.agent.context.messages),
+          buildMessages: () => this.agent.context.messages,
           dispatchEvent: this.buildDispatchEvent(turnId),
           tools: this.agent.tools.loopTools,
           log: this.agent.log,

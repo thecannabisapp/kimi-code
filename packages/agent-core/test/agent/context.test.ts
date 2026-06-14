@@ -791,6 +791,8 @@ describe('Agent context notification projection', () => {
       event: {
         type: 'tool.call',
         uuid: 'call_1',
+        turnId: '',
+        step: 1,
         stepUuid: 'origin-step',
         toolCallId: 'call_1',
         name: 'Bash',
@@ -810,7 +812,7 @@ describe('Agent context notification projection', () => {
     ]);
   });
 
-  it('trims open tool calls followed by user message', () => {
+  it('trims open tool calls followed by user message and merges surrounding user messages', () => {
     const ctx = testAgent();
     ctx.configure();
 
@@ -824,6 +826,8 @@ describe('Agent context notification projection', () => {
       event: {
         type: 'tool.call',
         uuid: 'call_1',
+        turnId: '',
+        step: 1,
         stepUuid: 'origin-step',
         toolCallId: 'call_1',
         name: 'Bash',
@@ -840,12 +844,79 @@ describe('Agent context notification projection', () => {
     ctx.agent.context.appendUserMessage([{ type: 'text', text: 'second prompt' }]);
 
     // The tool call does not have a tool.result yet, and is followed by the new user message.
-    // Both the assistant message and the open tool call must be cleaned/trimmed.
+    // The orphan assistant is removed, and the surrounding user-origin messages are merged.
     expect(trimTrailingOpenToolExchange(ctx.agent.context.messages)).toMatchObject([
-      { role: 'user', content: [{ type: 'text', text: 'first prompt' }] },
-      { role: 'user', content: [{ type: 'text', text: 'second prompt' }] }
+      {
+        role: 'user',
+        content: [{ type: 'text', text: 'first prompt\n\nsecond prompt' }],
+      },
     ]);
   });
+
+  it('project() drops only the orphan tool call and its tool message when others are answered', () => {
+    const messages = project([
+      userMessage('run both'),
+      {
+        role: 'assistant',
+        content: [{ type: 'text', text: 'doing both' }],
+        toolCalls: [
+          { type: 'function', id: 'call_a', name: 'A', arguments: '{}' },
+          { type: 'function', id: 'call_b', name: 'B', arguments: '{}' },
+        ],
+      },
+      {
+        role: 'tool',
+        content: [{ type: 'text', text: 'a result' }],
+        toolCalls: [],
+        toolCallId: 'call_a',
+      },
+    ]);
+
+    expect(messages).toMatchObject([
+      { role: 'user' },
+      {
+        role: 'assistant',
+        content: [{ type: 'text', text: 'doing both' }],
+        toolCalls: [{ id: 'call_a' }],
+      },
+      { role: 'tool', toolCallId: 'call_a' },
+    ]);
+  });
+
+  it('project() does not match a reused toolCallId from an earlier completed turn', () => {
+    const messages = project([
+      userMessage('first'),
+      {
+        role: 'assistant',
+        content: [{ type: 'text', text: 'first answer' }],
+        toolCalls: [{ type: 'function', id: 'call_reused', name: 'Bash', arguments: '{}' }],
+      },
+      {
+        role: 'tool',
+        content: [{ type: 'text', text: 'first result' }],
+        toolCalls: [],
+        toolCallId: 'call_reused',
+      },
+      userMessage('second'),
+      {
+        role: 'assistant',
+        content: [{ type: 'text', text: 'second answer' }],
+        toolCalls: [{ type: 'function', id: 'call_reused', name: 'Bash', arguments: '{}' }],
+      },
+    ]);
+
+    // The second assistant reuses call_reused but has no matching tool result in its segment.
+    // The orphan tool_call must be removed; the assistant text is kept because
+    // it has other content, and the earlier result is not treated as a match.
+    expect(messages).toMatchObject([
+      { role: 'user', content: [{ type: 'text', text: 'first' }] },
+      { role: 'assistant', content: [{ type: 'text', text: 'first answer' }] },
+      { role: 'tool', toolCallId: 'call_reused' },
+      { role: 'user', content: [{ type: 'text', text: 'second' }] },
+      { role: 'assistant', content: [{ type: 'text', text: 'second answer' }], toolCalls: [] },
+    ]);
+  });
+
 });
 
 function userMessage(text: string, origin?: ContextMessage['origin']): ContextMessage {

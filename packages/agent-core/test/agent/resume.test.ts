@@ -152,6 +152,15 @@ describe('Agent resume', () => {
           ],
         },
       } as unknown as AgentRecord,
+      {
+        type: 'context.append_loop_event',
+        event: {
+          type: 'tool.result',
+          parentUuid: 'call_legacy_bash',
+          toolCallId: 'call_legacy_bash',
+          result: { output: '/home/user' },
+        },
+      },
     ]);
     const ctx = testAgent({ persistence });
 
@@ -549,6 +558,87 @@ describe('Agent resume', () => {
       type: 'message',
       message: expect.objectContaining({ role: 'assistant', content: [{ type: 'text', text: 'first response' }] }),
     });
+  });
+
+  it('cleans up an incomplete tool exchange from a crashed session and does not defer the next prompt', async () => {
+    const persistence = new RecordingAgentPersistence([
+      {
+        type: 'config.update',
+        cwd: process.cwd(),
+        modelAlias: MOCK_PROVIDER.model,
+        systemPrompt: DEFAULT_TEST_SYSTEM_PROMPT,
+        thinkingLevel: 'off',
+      },
+      {
+        type: 'context.append_message',
+        message: {
+          role: 'user',
+          content: [{ type: 'text', text: 'first prompt' }],
+          toolCalls: [],
+          origin: { kind: 'user' },
+        },
+      },
+      {
+        type: 'context.append_loop_event',
+        event: {
+          type: 'step.begin',
+          uuid: 'stale-step',
+          turnId: '0',
+          step: 1,
+        },
+      },
+      {
+        type: 'context.append_loop_event',
+        event: {
+          type: 'tool.call',
+          uuid: 'stale-call',
+          turnId: '0',
+          step: 1,
+          stepUuid: 'stale-step',
+          toolCallId: 'call_stale',
+          name: 'Read',
+          args: { path: 'file.txt' },
+        },
+      },
+      {
+        // This user message arrived while the tool exchange was open, so it
+        // was deferred. On resume it must be flushed after the orphan exchange
+        // is removed, not left stuck.
+        type: 'context.append_message',
+        message: {
+          role: 'user',
+          content: [{ type: 'text', text: 'follow-up prompt' }],
+          toolCalls: [],
+          origin: { kind: 'user' },
+        },
+      },
+    ]);
+    const ctx = testAgent({ persistence });
+
+    await ctx.agent.resume();
+
+    // History preserves the two user prompts separately; the orphan assistant
+    // placeholder is filtered from the model-visible projection, and adjacent
+    // user-origin messages are merged for the provider.
+    expect(ctx.agent.context.history.map((m) => m.role)).toEqual(['user', 'assistant', 'user']);
+    expect(ctx.agent.context.messages).toHaveLength(1);
+    expect(
+      ctx.agent.context.messages[0]?.content
+        .filter((p) => p.type === 'text')
+        .map((p) => p.text)
+        .join('\n\n'),
+    ).toContain('follow-up prompt');
+
+    ctx.mockNextResponse({ type: 'text', text: 'Fresh response.' });
+    await ctx.rpc.prompt({ input: [{ type: 'text', text: 'new prompt' }] });
+    await ctx.untilTurnEnd();
+
+    expect(ctx.lastLlmInput()).toMatchInlineSnapshot(`
+      system: <system-prompt>
+      tools: []
+      messages:
+        user: text "first prompt\\n\\nfollow-up prompt\\n\\nnew prompt"
+    `);
   });
 });
 

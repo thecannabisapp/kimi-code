@@ -300,8 +300,10 @@ export class Agent {
     await this.background.loadFromDisk();
     await this.background.reconcile();
     await this.cron?.loadFromDisk();
-    this.turn.finishResume();
+    // A session killed mid-tool-call may leave stale pending tool result IDs
+    // behind. Clear them so new user messages are not silently deferred.
     this.context.clearPendingToolResultIds();
+    this.turn.finishResume();
     return result;
   }
 
