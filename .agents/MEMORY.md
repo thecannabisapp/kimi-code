@@ -28,6 +28,7 @@ Key consequences for future changes:
 - New transcript content should only auto-scroll the user if they are already at the bottom; otherwise leave the viewport alone.
 - `clearTranscriptAndRedraw()` resets the transcript scroll offset so switching or replaying a session starts at the bottom instead of inheriting the previous session's viewport.
 - Scroll offset is clamped to the top during render based on visible transcript rows; do not try to clamp it manually outside the render path.
+- A session reload that fits entirely within the viewport will have no scrollable overflow — this is expected, not a bug. The alternate screen has no scrollback buffer; scrolling only becomes possible once the replayed transcript is taller than the visible area. `clearTranscriptAndRedraw()` resets the viewport to the bottom on switch so the user starts at the newest content.
 
 ## 2026-06-14 — TUI uses alternate screen buffer with pinned chrome overlay
 
