@@ -9,6 +9,7 @@
 - `resetScroll()` snaps back to the bottom; `appendTranscriptEntry` only resets when the user is already at the bottom so manual scroll position is preserved while reading history.
 - The TUI enables SGR mouse mode (`ESC [ ? 1006 h`) on top of basic mouse mode (`ESC [ ? 1000 h`) so Ghostty and other modern terminals send unambiguous wheel events.
 - The TUI input listener routes recognized wheel events to `transcriptWrapper.scrollBy(...)` and consumes all mouse sequences so they do not leak into the editor.
+- A keyboard fallback is provided: `Shift+PageUp` / `Shift+PageDown` scrolls the transcript without interfering with the editor's `Up` / `Down` prompt history.
 
 Key consequences for future changes:
 - Do not rely on the old `isMouseEventSequence` helper; use `transcriptWrapper.parseMouseWheel` and `isMouseSequence` for consume-or-scroll decisions.

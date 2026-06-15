@@ -6,6 +6,8 @@ import {
   type Component,
   type Focusable,
   getCapabilities,
+  Key,
+  matchesKey,
   Spacer,
 } from '@earendil-works/pi-tui';
 import type { DeviceAuthorization } from '@moonshot-ai/kimi-code-oauth';
@@ -43,7 +45,10 @@ import * as slashCommands from './commands/dispatch';
 import { BannerComponent } from './components/chrome/banner';
 import { DeviceCodeBoxComponent } from './components/chrome/device-code-box';
 import { MoonLoader, type SpinnerStyle } from './components/chrome/moon-loader';
-import { ChromeAwareContainer } from './components/chrome/chrome-aware-container';
+import {
+  ChromeAwareContainer,
+  WHEEL_SCROLL_LINES,
+} from './components/chrome/chrome-aware-container';
 import { WelcomeComponent } from './components/chrome/welcome';
 import {
   ApprovalPanelComponent,
@@ -471,6 +476,16 @@ export class KimiTUI {
         return { consume: true };
       }
       if (isMouseSequence(data)) {
+        return { consume: true };
+      }
+      // Keyboard fallback for transcript scrolling. Shift+PageUp/Down scrolls
+      // the conversation; plain Up/Down is left for the editor's prompt history.
+      if (matchesKey(data, Key.shift(Key.pageUp))) {
+        this.state.transcriptWrapper.scrollBy(WHEEL_SCROLL_LINES);
+        return { consume: true };
+      }
+      if (matchesKey(data, Key.shift(Key.pageDown))) {
+        this.state.transcriptWrapper.scrollBy(-WHEEL_SCROLL_LINES);
         return { consume: true };
       }
       return undefined;
