@@ -15,6 +15,7 @@ Key consequences for future changes:
 - Do not rely on the old `isMouseEventSequence` helper; use `transcriptWrapper.parseMouseWheel` and `isMouseSequence` for consume-or-scroll decisions.
 - Keep mouse mode setup and teardown symmetrical: enable `1006` after `1000`, disable `1006` before `1000` on exit.
 - New transcript content should only auto-scroll the user if they are already at the bottom; otherwise leave the viewport alone.
+- `clearTranscriptAndRedraw()` resets the transcript scroll offset so switching or replaying a session starts at the bottom instead of inheriting the previous session's viewport.
 - Scroll offset is clamped to the top during render based on visible transcript rows; do not try to clamp it manually outside the render path.
 
 ## 2026-06-14 — TUI uses alternate screen buffer with pinned chrome overlay

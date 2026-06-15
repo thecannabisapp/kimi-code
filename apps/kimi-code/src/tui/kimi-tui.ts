@@ -1558,6 +1558,9 @@ export class KimiTUI {
     this.streamingUI.resetToolUi();
     this.sessionEventHandler.stopAllMcpServerStatusSpinners();
     this.state.transcriptContainer.clear();
+    // Reset transcript scroll so a switched/replayed session starts at the
+    // bottom rather than inheriting the previous session's viewport.
+    this.state.transcriptWrapper.resetScroll();
     this.btwPanelController.clear();
     this.clearTerminalInlineImages();
     this.state.todoPanel.clear();
