@@ -35,18 +35,42 @@ export class ChromeAwareContainer extends Container {
     this.tui.requestRender();
   }
 
+  /** Whether the transcript is currently scrolled to the bottom. */
+  isScrolledToBottom(): boolean {
+    return this.scrollOffset === 0;
+  }
+
   /**
-   * Parse a mouse wheel sequence and return the scroll delta in transcript rows,
-   * or `undefined` if the input is not a wheel event.
+   * Parse a mouse wheel sequence and return the scroll delta in transcript rows.
+   * Returns `{ scrollBy: 0 }` for wheel releases (which should be consumed but
+   * should not scroll), and `undefined` for non-wheel input.
    */
   parseMouseWheel(data: string): { scrollBy: number } | undefined {
-    // SGR mouse sequence: ESC [ < B ; X ; Y M/m
-    // Button codes: 64 = wheel up, 65 = wheel down.
-    const match = /^\u001B\[(<(\d+);\d+;\d+)([Mm])$/.exec(data);
-    if (match === null) return undefined;
-    const button = Number(match[2]);
-    if (button === 64) return { scrollBy: WHEEL_SCROLL_LINES };
-    if (button === 65) return { scrollBy: -WHEEL_SCROLL_LINES };
+    // SGR mouse sequence (mode 1006): ESC [ < B ; X ; Y M/m
+    // Standard wheel codes are 4 (up) and 5 (down); some terminals emit 64/65.
+    const sgrMatch = /^\u001B\[<(\d+);\d+;\d+([Mm])$/.exec(data);
+    if (sgrMatch !== null) {
+      const button = Number(sgrMatch[1]);
+      const isRelease = sgrMatch[2] === 'm';
+      if (button === 4 || button === 64) {
+        return { scrollBy: isRelease ? 0 : WHEEL_SCROLL_LINES };
+      }
+      if (button === 5 || button === 65) {
+        return { scrollBy: isRelease ? 0 : -WHEEL_SCROLL_LINES };
+      }
+      return undefined;
+    }
+
+    // Legacy X11 mouse sequence (mode 1000): ESC [ M Cb Cx Cy
+    // Wheel up = button 4 -> byte 0x24 ('$'); wheel down = button 5 -> 0x25 ('%').
+    const x11Match = /^\u001B\[M([\x20-\x7f])([\x20-\x7f])([\x20-\x7f])$/.exec(data);
+    if (x11Match !== null) {
+      const button = x11Match[1]!.charCodeAt(0) - 32;
+      if (button === 4) return { scrollBy: WHEEL_SCROLL_LINES };
+      if (button === 5) return { scrollBy: -WHEEL_SCROLL_LINES };
+      return undefined;
+    }
+
     return undefined;
   }
 

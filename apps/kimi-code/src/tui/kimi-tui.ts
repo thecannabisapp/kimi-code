@@ -194,6 +194,12 @@ interface SendMessageOptions {
   readonly hasMedia?: boolean;
 }
 
+const MOUSE_SEQUENCE_RE = /^\u001B\[(?:<\d+;\d+;\d+[Mm]|M[\s\S]{3})$/;
+
+function isMouseSequence(data: string): boolean {
+  return MOUSE_SEQUENCE_RE.test(data);
+}
+
 export class KimiTUI {
   readonly harness: KimiHarness;
   readonly options: KimiTUIOptions;
@@ -457,11 +463,14 @@ export class KimiTUI {
     this.enterAlternateScreen();
     this.state.ui.start();
     this.mouseInputDispose = this.state.ui.addInputListener((data) => {
-      // Translate mouse wheel events into transcript scrolling so the wheel
-      // does not navigate the editor's input history.
+      // Translate mouse wheel events into transcript scrolling. Consume all
+      // mouse sequences so clicks and drags do not leak into the editor.
       const wheel = this.state.transcriptWrapper.parseMouseWheel(data);
       if (wheel) {
         this.state.transcriptWrapper.scrollBy(wheel.scrollBy);
+        return { consume: true };
+      }
+      if (isMouseSequence(data)) {
         return { consume: true };
       }
       return undefined;
@@ -473,15 +482,15 @@ export class KimiTUI {
   private enterAlternateScreen(): void {
     if (this.alternateScreenActive) return;
     this.alternateScreenActive = true;
-    // Enter alternate screen and enable basic mouse tracking so the terminal
-    // sends mouse events instead of translating wheel scroll into arrow keys.
-    process.stdout.write('\u001B[?1049h\u001B[?1000h');
+    // Enter alternate screen and enable SGR mouse tracking so the terminal
+    // sends unambiguous wheel events instead of translating scroll into arrow keys.
+    process.stdout.write('\u001B[?1049h\u001B[?1000h\u001B[?1006h');
   }
 
   private exitAlternateScreen(): void {
     if (!this.alternateScreenActive) return;
     this.alternateScreenActive = false;
-    process.stdout.write('\u001B[?1000l\u001B[?1049l');
+    process.stdout.write('\u001B[?1006l\u001B[?1000l\u001B[?1049l');
   }
 
   private stopTUI(): void {
@@ -1474,10 +1483,11 @@ export class KimiTUI {
       this.state.transcriptContainer.addChild(component);
       this.state.ui.requestRender();
     }
-    // New transcript content should start scrolled to the bottom so the user
-    // sees the latest output. Resetting keeps wheel-driven scroll position from
-    // pinning old content at the bottom.
-    this.state.transcriptWrapper.resetScroll();
+    // If the user is already at the bottom, keep them there as new content
+    // arrives. If they have scrolled up manually, leave the viewport alone.
+    if (this.state.transcriptWrapper.isScrolledToBottom()) {
+      this.state.transcriptWrapper.resetScroll();
+    }
   }
 
   private appendApprovalTranscriptEntry(

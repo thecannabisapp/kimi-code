@@ -2,16 +2,18 @@
 
 ## 2026-06-14 — Mouse wheel scroll in alternate-screen transcript
 
-`ChromeAwareContainer` now supports vertical scrolling and parses SGR wheel-up/down sequences so the alternate-screen transcript can be scrolled with the mouse wheel:
+`ChromeAwareContainer` now supports vertical scrolling so the alternate-screen transcript can be scrolled with the mouse wheel. Because the move to the alternate screen removed native terminal scrollback, manual scrolling is required to view earlier conversation history:
 
 - `scrollBy(delta)` moves the viewport up (positive) or down (negative) and clamps at the bottom (offset 0).
-- `parseMouseWheel(data)` returns `{ scrollBy: number }` for button codes 64 (wheel up) and 65 (wheel down), or `undefined` for non-wheel input.
-- `resetScroll()` snaps back to the bottom; `appendTranscriptEntry` calls this so new transcript content remains visible.
-- The TUI input listener routes recognized wheel events to `transcriptWrapper.scrollBy(...)` and consumes them so they do not navigate the editor's input history.
+- `parseMouseWheel(data)` recognizes both SGR (mode 1006) and legacy X11 (mode 1000) wheel sequences. Standard SGR wheel codes are 4 (up) and 5 (down); some terminals emit 64/65, so both are accepted. Wheel releases (`m`) are consumed without scrolling.
+- `resetScroll()` snaps back to the bottom; `appendTranscriptEntry` only resets when the user is already at the bottom so manual scroll position is preserved while reading history.
+- The TUI enables SGR mouse mode (`ESC [ ? 1006 h`) on top of basic mouse mode (`ESC [ ? 1000 h`) so Ghostty and other modern terminals send unambiguous wheel events.
+- The TUI input listener routes recognized wheel events to `transcriptWrapper.scrollBy(...)` and consumes all mouse sequences so they do not leak into the editor.
 
 Key consequences for future changes:
-- Do not rely on the old `isMouseEventSequence` helper; use `transcriptWrapper.parseMouseWheel` and only consume recognized wheel events.
-- Any code that appends transcript content and wants to keep the latest output visible should call `transcriptWrapper.resetScroll()`.
+- Do not rely on the old `isMouseEventSequence` helper; use `transcriptWrapper.parseMouseWheel` and `isMouseSequence` for consume-or-scroll decisions.
+- Keep mouse mode setup and teardown symmetrical: enable `1006` after `1000`, disable `1006` before `1000` on exit.
+- New transcript content should only auto-scroll the user if they are already at the bottom; otherwise leave the viewport alone.
 - Scroll offset is clamped to the top during render based on visible transcript rows; do not try to clamp it manually outside the render path.
 
 ## 2026-06-14 — TUI uses alternate screen buffer with pinned chrome overlay
