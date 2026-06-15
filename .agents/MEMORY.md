@@ -21,6 +21,8 @@ Trade-off: the duplicate-frame issue that the alternate screen was meant to fix 
 
 Gate passed after revert: `pnpm run typecheck`, `pnpm run lint`, `pnpm run test`, `pnpm --filter @moonshot-ai/kimi-code run build`.
 
+Confirmed by user after reloading a session: scrollback now works as expected. The default behaviour is that a session reload must allow the user to scroll back through the conversation using the terminal's native scrollback.
+
 ## 2026-06-14 — Upstream v0.15.0 merged; resume orphan handling refined
 
 Merged `MoonshotAI/kimi-code` `main` (tag `@moonshot-ai/kimi-code@0.15.0`) into local `main`.
