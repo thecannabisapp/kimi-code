@@ -21,7 +21,13 @@ const TOOL_EMPTY_STATUS = '<system>Tool output is empty.</system>';
 const TOOL_EMPTY_ERROR_STATUS =
   '<system>ERROR: Tool execution failed. Tool output is empty.</system>';
 const TOOL_OUTPUT_EMPTY_TEXT = 'Tool output is empty.';
+const TOOL_INTERRUPTED_ON_RESUME_OUTPUT =
+  'Tool execution was interrupted before its result was recorded. Do not assume the tool completed successfully.';
 
+// Invariant: _history must not contain an unresolved tool call exchange except
+// at the tail. When the tail is unresolved, pendingToolResultIds is exactly the
+// set of missing tool result ids for that tail exchange; appendMessage keeps
+// later messages in deferredMessages until those ids are resolved.
 export class ContextMemory {
   private _history: ContextMessage[] = [];
   private _tokenCount = 0;
@@ -209,6 +215,62 @@ export class ContextMemory {
   useProjectedHistoryFrom(source: ContextMemory): void {
     this.clear();
     this.pushHistory(...trimTrailingOpenToolExchange(source.project(source.history)));
+  }
+
+  finishResume(): void {
+    const interruptedToolCallIds = [...this.pendingToolResultIds];
+    if (interruptedToolCallIds.length === 0) return;
+
+    // Group interrupted tool calls by the open assistant step that owns them.
+    const stepsWithPending = new Map<ContextMessage, Set<string>>();
+    for (const toolCallId of interruptedToolCallIds) {
+      for (const step of this.openSteps.values()) {
+        if (step.toolCalls.some((tc) => tc.id === toolCallId)) {
+          const pending = stepsWithPending.get(step) ?? new Set<string>();
+          pending.add(toolCallId);
+          stepsWithPending.set(step, pending);
+          break;
+        }
+      }
+    }
+
+    for (const [step, pendingIds] of stepsWithPending) {
+      const hasCompletedToolCall = step.toolCalls.some((tc) => !pendingIds.has(tc.id));
+      if (hasCompletedToolCall || step.content.length > 0) {
+        // Partial exchange: keep the assistant message and synthesize error
+        // results for the missing tool calls below.
+        continue;
+      }
+
+      // The whole exchange is unanswered and the assistant placeholder is empty,
+      // so drop the orphan tool calls and do not synthesize any tool results.
+      for (const toolCallId of pendingIds) {
+        const index = step.toolCalls.findIndex((tc) => tc.id === toolCallId);
+        if (index !== -1) {
+          step.toolCalls.splice(index, 1);
+        }
+        this.pendingToolResultIds.delete(toolCallId);
+      }
+    }
+
+    const remainingPendingIds = [...this.pendingToolResultIds];
+    this.openSteps.clear();
+    if (remainingPendingIds.length === 0) {
+      this.flushDeferredMessagesIfToolExchangeClosed();
+      return;
+    }
+
+    for (const toolCallId of remainingPendingIds) {
+      this.appendLoopEvent({
+        type: 'tool.result',
+        parentUuid: toolCallId,
+        toolCallId,
+        result: {
+          output: TOOL_INTERRUPTED_ON_RESUME_OUTPUT,
+          isError: true,
+        },
+      });
+    }
   }
 
   appendLoopEvent(event: LoopRecordedEvent): void {

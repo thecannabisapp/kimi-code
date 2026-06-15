@@ -12,7 +12,7 @@ import {
   loadCustomAgentProfiles,
   type SystemPromptContext,
 } from '../../src/profile';
-import { SkillRegistry, type SkillDefinition } from '../../src/skill';
+import { SessionSkillRegistry, type SkillDefinition } from '../../src/skill';
 
 let workDir: string;
 
@@ -202,7 +202,7 @@ describe('default agent profiles', () => {
   });
 
   it('renders the model-invocable skill listing for bundled prompts', () => {
-    const skills = new SkillRegistry();
+    const skills = new SessionSkillRegistry();
     skills.register(skill('review', { whenToUse: 'When code review is requested.' }));
     skills.register({
       ...skill('nested-review', {
