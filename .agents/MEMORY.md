@@ -1,5 +1,16 @@
 # Memory
 
+## 2026-06-14 — Upstream v0.15.0 merged; resume orphan handling refined
+
+Merged `MoonshotAI/kimi-code` `main` (tag `@moonshot-ai/kimi-code@0.15.0`) into local `main`.
+- Resolved three unmerged paths: `apps/kimi-code/tsdown.config.ts`, `packages/agent-core/src/agent/index.ts`, and `packages/agent-core/test/agent/compaction/full.test.ts`.
+- Removed the consumed `.changeset/sse-mcp-servers.md`.
+- Fixed a lint failure caused by an unused value import (`ChromeAwareContainer`) in `apps/kimi-code/src/tui/kimi-tui.ts`; only `WHEEL_SCROLL_LINES` is needed there because the wrapper type comes from `tui-state.ts`.
+- Adjusted `ContextMemory.finishResume()` to handle two resume cases differently:
+  - **Fully orphaned tool exchange** (assistant placeholder is empty and *no* tool results were ever recorded): remove the orphan `toolCalls` from the assistant placeholder, clear pending IDs, and flush deferred user messages. No synthetic `tool` message is added, so the model-visible projection can filter the empty assistant and merge adjacent user messages.
+  - **Partially completed exchange** (at least one tool result exists, or the assistant has non-empty content): keep the existing upstream behaviour and synthesize error results for the missing tool calls so the conversation remains provider-valid.
+- Gate passed after fixes: `pnpm run typecheck`, `pnpm run lint`, `pnpm run test`, and `pnpm --filter @moonshot-ai/kimi-code run build` all green. Merge commit pushed to `origin/main`.
+
 ## 2026-06-14 — Mouse wheel scroll in alternate-screen transcript
 
 `ChromeAwareContainer` now supports vertical scrolling so the alternate-screen transcript can be scrolled with the mouse wheel. Because the move to the alternate screen removed native terminal scrollback, manual scrolling is required to view earlier conversation history:
