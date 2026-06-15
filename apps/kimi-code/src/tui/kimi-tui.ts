@@ -43,6 +43,7 @@ import * as slashCommands from './commands/dispatch';
 import { BannerComponent } from './components/chrome/banner';
 import { DeviceCodeBoxComponent } from './components/chrome/device-code-box';
 import { MoonLoader, type SpinnerStyle } from './components/chrome/moon-loader';
+import { ChromeAwareContainer } from './components/chrome/chrome-aware-container';
 import { WelcomeComponent } from './components/chrome/welcome';
 import {
   ApprovalPanelComponent,
@@ -191,12 +192,6 @@ interface SendMessageOptions {
   readonly parts?: readonly PromptPart[];
   readonly imageAttachmentIds?: readonly number[];
   readonly hasMedia?: boolean;
-}
-
-const MOUSE_EVENT_RE = /^\u001B\[(?:<\d+;\d+;\d+[Mm]|M[\s\S]{3})$/;
-
-function isMouseEventSequence(data: string): boolean {
-  return MOUSE_EVENT_RE.test(data);
 }
 
 export class KimiTUI {
@@ -462,9 +457,11 @@ export class KimiTUI {
     this.enterAlternateScreen();
     this.state.ui.start();
     this.mouseInputDispose = this.state.ui.addInputListener((data) => {
-      // Consume mouse event sequences so the wheel does not get translated
-      // into arrow keys and navigate the editor's input history.
-      if (isMouseEventSequence(data)) {
+      // Translate mouse wheel events into transcript scrolling so the wheel
+      // does not navigate the editor's input history.
+      const wheel = this.state.transcriptWrapper.parseMouseWheel(data);
+      if (wheel) {
+        this.state.transcriptWrapper.scrollBy(wheel.scrollBy);
         return { consume: true };
       }
       return undefined;
@@ -1477,6 +1474,10 @@ export class KimiTUI {
       this.state.transcriptContainer.addChild(component);
       this.state.ui.requestRender();
     }
+    // New transcript content should start scrolled to the bottom so the user
+    // sees the latest output. Resetting keeps wheel-driven scroll position from
+    // pinning old content at the bottom.
+    this.state.transcriptWrapper.resetScroll();
   }
 
   private appendApprovalTranscriptEntry(

@@ -6,6 +6,7 @@ import {
 } from '@earendil-works/pi-tui';
 
 import { ChromeAwareContainer } from './components/chrome/chrome-aware-container';
+
 import { FooterComponent } from './components/chrome/footer';
 import { GutterContainer } from './components/chrome/gutter-container';
 import type { MoonLoader, SpinnerStyle } from './components/chrome/moon-loader';
@@ -30,7 +31,7 @@ export interface TUIState {
   ui: TUI;
   terminal: ProcessTerminal;
   transcriptContainer: Container;
-  transcriptWrapper: Container;
+  transcriptWrapper: ChromeAwareContainer;
   chromeContainer: Container;
   chromeOverlay: OverlayHandle | undefined;
   activityContainer: Container;

@@ -1,5 +1,19 @@
 # Memory
 
+## 2026-06-14 — Mouse wheel scroll in alternate-screen transcript
+
+`ChromeAwareContainer` now supports vertical scrolling and parses SGR wheel-up/down sequences so the alternate-screen transcript can be scrolled with the mouse wheel:
+
+- `scrollBy(delta)` moves the viewport up (positive) or down (negative) and clamps at the bottom (offset 0).
+- `parseMouseWheel(data)` returns `{ scrollBy: number }` for button codes 64 (wheel up) and 65 (wheel down), or `undefined` for non-wheel input.
+- `resetScroll()` snaps back to the bottom; `appendTranscriptEntry` calls this so new transcript content remains visible.
+- The TUI input listener routes recognized wheel events to `transcriptWrapper.scrollBy(...)` and consumes them so they do not navigate the editor's input history.
+
+Key consequences for future changes:
+- Do not rely on the old `isMouseEventSequence` helper; use `transcriptWrapper.parseMouseWheel` and only consume recognized wheel events.
+- Any code that appends transcript content and wants to keep the latest output visible should call `transcriptWrapper.resetScroll()`.
+- Scroll offset is clamped to the top during render based on visible transcript rows; do not try to clamp it manually outside the render path.
+
 ## 2026-06-14 — TUI uses alternate screen buffer with pinned chrome overlay
 
 To fix duplicate-frame rendering when the transcript grows, the Kimi Code TUI now:
