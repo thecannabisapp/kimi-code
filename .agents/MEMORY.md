@@ -1,5 +1,26 @@
 # Memory
 
+## 2026-06-14 — Reverted alternate-screen and mouse-capture changes
+
+The move to the alternate screen (`ESC [ ? 1049 h`) and SGR mouse tracking (`ESC [ ? 1000 / 1006 h`) broke two behaviours the user relies on:
+
+- **Native text selection** — with mouse reporting enabled, Ghostty routes clicks/drags to the application, so drag-to-select only works while holding `Shift`.
+- **Terminal scrollback / wheel scroll** — the alternate screen has no scrollback buffer, and our manual scroll offset only moves when the transcript is taller than the visible area. In a normal conversation the user expects the terminal's own scrollback to work.
+
+Reverted in `apps/kimi-code/src/tui/kimi-tui.ts`:
+- Removed `enterAlternateScreen()` / `exitAlternateScreen()` and the `alternateScreenActive` tracker.
+- Removed the input listener that consumed mouse wheel events and `Shift+PageUp`/`Shift+PageDown`.
+- Removed the `Key`, `matchesKey`, `WHEEL_SCROLL_LINES`, `isMouseSequence`, and `MOUSE_SEQUENCE_RE` wiring.
+
+The TUI now runs in the primary screen again, which restores:
+- drag-to-select without `Shift`,
+- mouse wheel scrolling through the terminal scrollback,
+- the previous visual behaviour the user asked for.
+
+Trade-off: the duplicate-frame issue that the alternate screen was meant to fix may return. The manual-scroll code in `ChromeAwareContainer` (`scrollBy`, `parseMouseWheel`, `resetScroll`) is now dormant but left in place so a future opt-in alternate-screen / mouse-capture mode can reuse it.
+
+Gate passed after revert: `pnpm run typecheck`, `pnpm run lint`, `pnpm run test`, `pnpm --filter @moonshot-ai/kimi-code run build`.
+
 ## 2026-06-14 — Upstream v0.15.0 merged; resume orphan handling refined
 
 Merged `MoonshotAI/kimi-code` `main` (tag `@moonshot-ai/kimi-code@0.15.0`) into local `main`.

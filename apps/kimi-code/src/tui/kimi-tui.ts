@@ -6,8 +6,6 @@ import {
   type Component,
   type Focusable,
   getCapabilities,
-  Key,
-  matchesKey,
   Spacer,
 } from '@earendil-works/pi-tui';
 import type { DeviceAuthorization } from '@moonshot-ai/kimi-code-oauth';
@@ -47,7 +45,6 @@ import * as slashCommands from './commands/dispatch';
 import { BannerComponent } from './components/chrome/banner';
 import { DeviceCodeBoxComponent } from './components/chrome/device-code-box';
 import { MoonLoader, type SpinnerStyle } from './components/chrome/moon-loader';
-import { WHEEL_SCROLL_LINES } from './components/chrome/chrome-aware-container';
 import { WelcomeComponent } from './components/chrome/welcome';
 import {
   ApprovalPanelComponent,
@@ -201,12 +198,6 @@ interface SendMessageOptions {
   readonly hasMedia?: boolean;
 }
 
-const MOUSE_SEQUENCE_RE = /^\u001B\[(?:<\d+;\d+;\d+[Mm]|M[\s\S]{3})$/;
-
-function isMouseSequence(data: string): boolean {
-  return MOUSE_SEQUENCE_RE.test(data);
-}
-
 export class KimiTUI {
   readonly harness: KimiHarness;
   readonly options: KimiTUIOptions;
@@ -229,8 +220,6 @@ export class KimiTUI {
   private uninstallRainbowDance: () => void;
   private signalCleanupHandlers: Array<() => void> = [];
   private isShuttingDown = false;
-  private alternateScreenActive = false;
-  private mouseInputDispose: (() => void) | undefined;
   private readonly migrationPlan: MigrationPlan | null;
   private readonly migrateOnly: boolean;
   private startupNotice: string | undefined;
@@ -467,54 +456,13 @@ export class KimiTUI {
   }
 
   private startEventLoop(): void {
-    this.enterAlternateScreen();
     this.state.ui.start();
-    this.mouseInputDispose = this.state.ui.addInputListener((data) => {
-      // Translate mouse wheel events into transcript scrolling. Consume all
-      // mouse sequences so clicks and drags do not leak into the editor.
-      const wheel = this.state.transcriptWrapper.parseMouseWheel(data);
-      if (wheel) {
-        this.state.transcriptWrapper.scrollBy(wheel.scrollBy);
-        return { consume: true };
-      }
-      if (isMouseSequence(data)) {
-        return { consume: true };
-      }
-      // Keyboard fallback for transcript scrolling. Shift+PageUp/Down scrolls
-      // the conversation; plain Up/Down is left for the editor's prompt history.
-      if (matchesKey(data, Key.shift(Key.pageUp))) {
-        this.state.transcriptWrapper.scrollBy(WHEEL_SCROLL_LINES);
-        return { consume: true };
-      }
-      if (matchesKey(data, Key.shift(Key.pageDown))) {
-        this.state.transcriptWrapper.scrollBy(-WHEEL_SCROLL_LINES);
-        return { consume: true };
-      }
-      return undefined;
-    });
     this.terminalFocusTrackingDispose = installTerminalFocusTracking(this.state);
     this.refreshTerminalThemeTracking();
   }
 
-  private enterAlternateScreen(): void {
-    if (this.alternateScreenActive) return;
-    this.alternateScreenActive = true;
-    // Enter alternate screen and enable SGR mouse tracking so the terminal
-    // sends unambiguous wheel events instead of translating scroll into arrow keys.
-    process.stdout.write('\u001B[?1049h\u001B[?1000h\u001B[?1006h');
-  }
-
-  private exitAlternateScreen(): void {
-    if (!this.alternateScreenActive) return;
-    this.alternateScreenActive = false;
-    process.stdout.write('\u001B[?1006l\u001B[?1000l\u001B[?1049l');
-  }
-
   private stopTUI(): void {
-    this.mouseInputDispose?.();
-    this.mouseInputDispose = undefined;
     this.state.ui.stop();
-    this.exitAlternateScreen();
   }
 
   private startBackgroundFdAutocomplete(): void {
@@ -751,7 +699,6 @@ export class KimiTUI {
   private emergencyTerminalExit(exitCode = 129): never {
     this.isShuttingDown = true;
     this.unregisterSignalHandlers();
-    this.exitAlternateScreen();
     // Best-effort: terminate any child processes in our process group so
     // background tasks (e.g., firebase emulator spawned by playwright) do not
     // outlive a terminal close / SIGHUP.
