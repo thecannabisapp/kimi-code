@@ -1,5 +1,23 @@
 # Memory
 
+## 2026-06-14 — Research: duplicate frames cannot be fixed without alternate screen
+
+Investigated whether the duplicate-frame/scrollback-pollution issue can be solved while keeping the TUI in the primary screen.
+
+Findings:
+- **Root cause**: `pi-tui` renders into the primary screen buffer. When the live region grows past the terminal height, the incremental renderer emits `\r\n` to scroll the terminal, which pushes the previous full frame into scrollback. Full redraws (e.g., on width changes) do the same. This is by design of the library's differential-rendering model.
+- **Upstream status**: `earendil-works/pi` discussion #1712 and issue #3757 identify the same problem. The upstream-suggested fix is to add alternate-screen support to `ProcessTerminal` (`ESC [ ? 1049 h` / `l`), optionally behind a flag. `pi-tui` v0.74.0 (the version this repo uses) does not expose such a flag.
+- **Peer tools**:
+  - **Claude Code** renders in the primary screen and has the same scrollback-duplication issues (anthropics/claude-code #49086, #51340, #53248).
+  - **OpenAI Codex** uses the alternate screen by default; its `--no-alt-screen` mode still fails to preserve scrollback because it keeps doing full-screen redraws in the primary buffer (openai/codex #10331, #11192).
+- **Non-alternate-screen options considered**:
+  1. **Reduce unnecessary re-renders** (e.g., memoize footer status updates). This can slow the rate of duplication but does not eliminate it, because legitimate transcript growth still triggers the append-and-scroll path.
+  2. **Terminal scrolling region (`DECSTBM`)**. In theory this could limit auto-scroll to the transcript area, but `pi-tui` does not use regions and its cursor-positioning logic assumes the whole screen; injecting a region externally would break overlays and editor focus.
+  3. **Line-at-a-time / logger-style output** instead of a TUI. This would give clean scrollback, but it is not a TUI and would require a separate renderer.
+  4. **In-app history viewer** (e.g. a `/history` pager). This would give access to older messages without relying on terminal scrollback, but it is a new feature, not a rendering fix.
+
+Conclusion: there is no supported way to keep the `pi-tui`-based TUI in the primary screen while also keeping the scrollback free of duplicate frames. The only robust fix is the alternate screen. If duplicate frames become unacceptable, the right path is to re-introduce the alternate screen as an opt-in `tui.toml` setting (`alternate_screen = true`), accepting the loss of native scrollback/selection.
+
 ## 2026-06-14 — Reverted alternate-screen and mouse-capture changes
 
 The move to the alternate screen (`ESC [ ? 1049 h`) and SGR mouse tracking (`ESC [ ? 1000 / 1006 h`) broke two behaviours the user relies on:
