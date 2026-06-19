@@ -472,6 +472,12 @@ interface ExtendedState extends KimiClientState {
   sideChatSendingByAgent: Record<string, boolean>;
   /** User message ids sent through BTW so they can be hidden from the main transcript. */
   sideChatUserMessageIdsBySession: Record<string, string[]>;
+  /** True when older messages are being fetched for a session (scroll-up lazy load). */
+  messagesLoadingMoreBySession: Record<string, boolean>;
+  /** Whether the server has more older messages than currently loaded per session. */
+  messagesHasMoreBySession: Record<string, boolean>;
+  /** True when the last older-message fetch failed for a session. */
+  messagesLoadMoreErrorBySession: Record<string, boolean>;
 }
 
 const rawState: ExtendedState = reactive({
@@ -505,6 +511,9 @@ const rawState: ExtendedState = reactive({
   sideChatMessagesByAgent: {},
   sideChatSendingByAgent: {},
   sideChatUserMessageIdsBySession: {},
+  messagesLoadingMoreBySession: {},
+  messagesHasMoreBySession: {},
+  messagesLoadMoreErrorBySession: {},
 });
 
 // Models + Providers reactive state (lazy-loaded, cached)
@@ -1197,6 +1206,9 @@ async function handleSessionNotFound(sessionId: string): Promise<void> {
   delete rawState.gitStatusBySession[sessionId];
   delete rawState.lastSeqBySession[sessionId];
   delete rawState.compactionBySession[sessionId];
+  delete rawState.messagesLoadingMoreBySession[sessionId];
+  delete rawState.messagesHasMoreBySession[sessionId];
+  delete rawState.messagesLoadMoreErrorBySession[sessionId];
   delete epochBySession[sessionId];
   sessionsKnownEmpty.delete(sessionId);
 
@@ -1232,6 +1244,10 @@ async function syncSessionFromSnapshot(sessionId: string): Promise<SyncSessionRe
       ...rawState.messagesBySession,
       [sessionId]: snap.messages,
     };
+    rawState.messagesHasMoreBySession = {
+      ...rawState.messagesHasMoreBySession,
+      [sessionId]: snap.hasMoreMessages,
+    };
     rawState.approvalsBySession = {
       ...rawState.approvalsBySession,
       [sessionId]: snap.pendingApprovals,
@@ -1265,6 +1281,54 @@ async function syncSessionFromSnapshot(sessionId: string): Promise<SyncSessionRe
       sessionId,
     });
     return 'failed';
+  }
+}
+
+const MESSAGES_PAGE_SIZE = 50;
+
+async function loadOlderMessages(sessionId: string): Promise<void> {
+  if (rawState.messagesLoadingMoreBySession[sessionId]) return;
+  const current = rawState.messagesBySession[sessionId];
+  if (!current || current.length === 0) return;
+
+  const beforeId = current[0]!.id;
+  rawState.messagesLoadingMoreBySession = {
+    ...rawState.messagesLoadingMoreBySession,
+    [sessionId]: true,
+  };
+  rawState.messagesLoadMoreErrorBySession = {
+    ...rawState.messagesLoadMoreErrorBySession,
+    [sessionId]: false,
+  };
+  try {
+    const page = await getKimiWebApi().listMessages(sessionId, {
+      beforeId,
+      pageSize: MESSAGES_PAGE_SIZE,
+    });
+    // Server returns newest-first; the UI keeps messages in chronological order.
+    const older = [...page.items].reverse();
+    // Live events may have appended messages while the request was in flight;
+    // read the latest array so those messages are not overwritten.
+    const latest = rawState.messagesBySession[sessionId] ?? current;
+    rawState.messagesBySession = {
+      ...rawState.messagesBySession,
+      [sessionId]: [...older, ...latest],
+    };
+    rawState.messagesHasMoreBySession = {
+      ...rawState.messagesHasMoreBySession,
+      [sessionId]: page.hasMore,
+    };
+  } catch (err) {
+    rawState.messagesLoadMoreErrorBySession = {
+      ...rawState.messagesLoadMoreErrorBySession,
+      [sessionId]: true,
+    };
+    pushOperationFailure('loadOlderMessages', err, { sessionId });
+  } finally {
+    rawState.messagesLoadingMoreBySession = {
+      ...rawState.messagesLoadingMoreBySession,
+      [sessionId]: false,
+    };
   }
 }
 
@@ -2109,6 +2173,19 @@ const connection = computed<ConnectionState>(() => rawState.connection);
 
 const loading = computed<boolean>(() => rawState.loading);
 const sessionLoading = computed<boolean>(() => rawState.sessionLoading);
+const loadingMoreMessages = computed<boolean>(() => {
+  const sid = rawState.activeSessionId;
+  return sid ? rawState.messagesLoadingMoreBySession[sid] ?? false : false;
+});
+const hasMoreMessages = computed<boolean>(() => {
+  const sid = rawState.activeSessionId;
+  return sid ? rawState.messagesHasMoreBySession[sid] ?? false : false;
+});
+const loadMoreMessagesError = computed<boolean>(() => {
+  const sid = rawState.activeSessionId;
+  return sid ? rawState.messagesLoadMoreErrorBySession[sid] ?? false : false;
+});
+const serverVersion = computed<string>(() => rawState.serverVersion);
 
 const permission = computed<PermissionMode>(() => rawState.permission);
 const thinking = computed<ThinkingLevel>(() => rawState.thinking);
@@ -2352,8 +2429,12 @@ const mergedWorkspaces = computed<AppWorkspace[]>(() => {
   const result: AppWorkspace[] = [];
   for (const root of [...realRoots, ...derivedRoots]) {
     const w = byRoot.get(root)!;
-    // Match count by either id or root (derived id === root).
-    const count = counts.get(w.id) ?? counts.get(w.root) ?? w.sessionCount;
+    // Match count by either id or root (derived id === root). Once sessions
+    // have loaded, trust the live local count (0 when no sessions remain) rather
+    // than the daemon's sessionCount, which historically counted archived
+    // sessions and would keep a workspace looking non-empty after its last
+    // session was archived.
+    const count = counts.get(w.id) ?? counts.get(w.root) ?? (rawState.loading ? w.sessionCount : 0);
     let branch = w.branch;
     if (!branch && activeGit && activeRoot === w.root) branch = activeGit.branch;
     result.push({ ...w, sessionCount: count, branch });
@@ -2393,16 +2474,20 @@ const visibleWorkspace = computed<WorkspaceView | null>(() => {
  */
 const sessionsForView = computed<Session[]>(() => {
   void sessionTimeClock.value;
+  const visibleWorkspaceIds = new Set(workspacesView.value.map((w) => w.id));
   // Child ("side chat") sessions never appear in the main list — they live in
-  // the side-chat panel only.
+  // the side-chat panel only. Sessions under a removed (hidden) workspace are
+  // excluded too, so this flat list matches what the grouped sidebar renders
+  // and sidebar search can't resurrect sessions from a removed workspace.
   return rawState.sessions
-    .filter((s) => !s.parentSessionId)
+    .filter((s) => !s.parentSessionId && visibleWorkspaceIds.has(workspaceIdForSession(s)))
     .map((s) => ({
       id: s.id,
       title: s.title,
       time: formatTime(s.updatedAt, s.status),
       status: s.status,
       busy: isSessionEffectivelyRunning(s.id),
+      lastPrompt: s.lastPrompt,
     }));
 });
 
@@ -2667,18 +2752,37 @@ async function updateConfig(patch: Partial<AppConfig>): Promise<boolean> {
 // global connecting-splash so a page refresh doesn't flash a half-empty app.
 const initialized = ref(false);
 
+// Backend max page size for GET /sessions. Bigger pages mean fewer round-trips
+// when draining the full session list.
+const SESSION_PAGE_SIZE = 100;
+
+/** Drain every page of sessions, newest first. A single global walk (instead of
+ *  per-workspace) so sessions whose cwd is not a registered workspace root are
+ *  still reachable after a refresh. */
+async function listAllSessionsGlobal(): Promise<AppSession[]> {
+  const api = getKimiWebApi();
+  const items: AppSession[] = [];
+  let beforeId: string | undefined;
+  for (;;) {
+    const page = await api.listSessions({ pageSize: SESSION_PAGE_SIZE, beforeId });
+    items.push(...page.items);
+    if (!page.hasMore || page.items.length === 0) break;
+    beforeId = page.items[page.items.length - 1]!.id;
+  }
+  return items;
+}
+
 async function load(): Promise<void> {
   rawState.loading = true;
   try {
     const api = getKimiWebApi();
-    // Parallel: health + meta + sessions + models
-    const [, , sessionsPage] = await Promise.all([
+    // Parallel: health + meta + models
+    await Promise.all([
       api.getHealth().catch(() => null),
       api.getMeta().then((m) => {
         rawState.serverVersion = m.serverVersion;
         rawState.availableOpenInApps = m.openInApps;
       }).catch(() => null),
-      api.listSessions({ pageSize: 20 }).catch(() => ({ items: [], hasMore: false })),
       loadModels(),
     ]);
 
@@ -2686,14 +2790,17 @@ async function load(): Promise<void> {
     await checkAuth();
     await loadConfig();
 
-    rawState.sessions = sessionsPage.items;
+    // Drain every session via a single global walk so sessions whose cwd is not
+    // a registered workspace root are still reachable after a refresh.
+    const sessions = await listAllSessionsGlobal().catch(() => [] as AppSession[]);
+    rawState.sessions = sessions;
 
     // Load workspaces (real if available, else derived from session cwds).
     await loadWorkspaces();
 
     // First load: pick the workspace of the most-recent session, unless the
     // user already has a persisted active workspace that still exists.
-    const mostRecent = sessionsPage.items[0];
+    const mostRecent = sessions[0];
     const persisted = rawState.activeWorkspaceId;
     const persistedStillExists =
       persisted !== null && mergedWorkspaces.value.some((w) => w.id === persisted);
@@ -2702,7 +2809,7 @@ async function load(): Promise<void> {
     }
 
     // URL deep link (/sessions/<id>) takes priority over auto-select. The
-    // session may live beyond the first listSessions page — fetch it then.
+    // session may live outside the loaded pages (e.g. archived) — fetch it then.
     // selectSession syncs the active workspace off the (now present) entry.
     bindSessionRoute();
     const urlSessionId =
@@ -2718,8 +2825,8 @@ async function load(): Promise<void> {
 
     // Auto-select first session if none selected (also the fallback for a dead
     // deep link — 'replace' rewrites the URL to the session actually shown).
-    if (!rawState.activeSessionId && sessionsPage.items.length > 0) {
-      await selectSession(sessionsPage.items[0]!.id, { urlMode: 'replace' });
+    if (!rawState.activeSessionId && sessions.length > 0) {
+      await selectSession(sessions[0]!.id, { urlMode: 'replace' });
     }
   } catch (err) {
     pushOperationFailure('load', err);
@@ -4271,6 +4378,10 @@ export function useKimiWebClient() {
     connection,
     loading,
     sessionLoading,
+    loadingMoreMessages,
+    hasMoreMessages,
+    loadMoreMessagesError,
+    serverVersion,
     initialized,
     permission,
     thinking,
@@ -4316,6 +4427,7 @@ export function useKimiWebClient() {
     load,
     selectSession,
     createSession,
+    loadOlderMessages,
 
     // Workspace actions
     loadWorkspaces,
