@@ -33,13 +33,14 @@ import {
   type LoopTurnInterruptedEvent,
   type LoopTurnStopReason,
 } from '../../loop/index';
-import type { AgentEvent, TurnEndedEvent } from '../../rpc';
+import type { AgentEvent, TurnEndedEvent, TurnEndReason } from '../../rpc';
 import type { TelemetryPropertyValue } from '../../telemetry';
 import { abortable, isUserCancellation, userCancellationReason } from '../../utils/abort';
 import { USER_PROMPT_ORIGIN, type PromptOrigin } from '../context';
 import { renderUserPromptHookBlockResult, renderUserPromptHookResult } from '../../session/hooks';
 import { canonicalTelemetryArgs, isPlainRecord } from './canonical-args';
 import { ToolCallDeduplicator } from './tool-dedup';
+import { budgetToolResultForModel } from './tool-result-budget';
 
 interface ActiveTurn {
   readonly turnId: number;
@@ -76,6 +77,7 @@ const GOAL_PROVIDER_AUTH_PAUSE_PREFIX = 'Paused after provider authentication er
 const GOAL_PROVIDER_API_PAUSE_PREFIX = 'Paused after provider API error';
 const GOAL_MODEL_CONFIG_PAUSE_PREFIX = 'Paused after model configuration error';
 const GOAL_RUNTIME_PAUSE_PREFIX = 'Paused after runtime error';
+const GOAL_PROVIDER_FILTERED_PAUSE_REASON = 'Paused after provider safety policy block';
 
 /**
  * The prompt the goal driver appends to start each continuation turn — the
@@ -334,7 +336,8 @@ export class TurnFlow {
       if (
         goalBecameActive &&
         end.event.reason !== 'cancelled' &&
-        end.event.reason !== 'failed'
+        end.event.reason !== 'failed' &&
+        end.event.reason !== 'filtered'
       ) {
         return await this.driveGoal(
           this.allocateTurnId(),
@@ -392,6 +395,10 @@ export class TurnFlow {
       }
       if (end.event.reason === 'failed') {
         await this.agent.goal.pauseActiveGoal({ reason: goalFailurePauseReason(end.event.error) });
+        return end;
+      }
+      if (end.event.reason === 'filtered') {
+        await this.agent.goal.pauseActiveGoal({ reason: GOAL_PROVIDER_FILTERED_PAUSE_REASON });
         return end;
       }
       if (end.blockedByUserPromptHook === true) {
@@ -470,7 +477,6 @@ export class TurnFlow {
     this.agent.fullCompaction.resetForTurn();
     this.agent.usage.beginTurn();
     this.agent.emitEvent({ type: 'turn.started', turnId, origin });
-    this.agent.context.clearPendingToolResultIds();
     this.agent.context.appendUserMessage(input, origin);
 
     const startedAt = Date.now();
@@ -488,10 +494,12 @@ export class TurnFlow {
       } else {
         const stopReason = await this.runStepLoop(turnId, signal);
         completedStopReason = stopReason;
+        const reason: TurnEndReason =
+          stopReason === 'aborted' ? 'cancelled' : stopReason === 'filtered' ? 'filtered' : 'completed';
         ended = {
           type: 'turn.ended',
           turnId,
-          reason: stopReason === 'aborted' ? 'cancelled' : 'completed',
+          reason,
           durationMs: Date.now() - startedAt,
         };
       }
@@ -572,7 +580,6 @@ export class TurnFlow {
     this.currentStepByTurn.delete(turnId);
     this.interruptedTelemetryTurnIds.delete(turnId);
     this.stepFailureByTurn.delete(turnId);
-    this.agent.context.clearPendingToolResultIds();
     return { event: ended, stopReason: completedStopReason, blockedByUserPromptHook };
   }
 
@@ -759,7 +766,12 @@ export class TurnFlow {
                   toolOutput: isError === true ? undefined : toolOutputText(output).slice(0, 2000),
                 },
               });
-              return finalResult;
+              return budgetToolResultForModel({
+                homedir: this.agent.homedir,
+                toolName: ctx.toolCall.name,
+                toolCallId: ctx.toolCall.id,
+                result: finalResult,
+              });
             },
           },
         });

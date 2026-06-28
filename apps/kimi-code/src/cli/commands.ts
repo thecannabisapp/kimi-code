@@ -44,7 +44,8 @@ export function createProgram(
         .hideHelp()
         .argParser((val: string | boolean) => (val === true ? '' : (val as string))),
     )
-    .option('-C, --continue', 'Continue the previous session for the working directory.', false)
+    .option('-c, --continue', 'Continue the previous session for the working directory.', false)
+    .addOption(new Option('-C').hideHelp().default(false))
     .option('-y, --yolo', 'Automatically approve all actions.', false)
     .option('--auto', 'Start in auto permission mode.', false)
     .addOption(
@@ -79,6 +80,14 @@ export function createProgram(
         'Load agent profiles from this directory instead of the bundled defaults.',
       ),
     )
+    .addOption(
+      new Option(
+        '--add-dir <dir>',
+        'Add an additional workspace directory for this session. Can be repeated.',
+      )
+        .argParser((value: string, previous: string[] | undefined) => [...(previous ?? []), value])
+        .default([]),
+    )
     .addOption(new Option('--yes').hideHelp().default(false))
     .addOption(new Option('--auto-approve').hideHelp().default(false))
     .option('--plan', 'Start in plan mode.', false);
@@ -93,6 +102,7 @@ export function createProgram(
   registerMigrateCommand(program, onMigrate);
   program
     .command('upgrade')
+    .alias('update')
     .description('Upgrade Kimi Code to the latest version.')
     .action(async () => {
       await onUpgrade();
@@ -121,7 +131,7 @@ export function createProgram(
 
     const opts: CLIOptions = {
       session: sessionValue,
-      continue: raw['continue'] as boolean,
+      continue: raw['continue'] === true || raw['C'] === true,
       yolo: yoloValue,
       auto: autoValue,
       plan: raw['plan'] as boolean,
@@ -130,6 +140,7 @@ export function createProgram(
       prompt: raw['prompt'] as string | undefined,
       skillsDirs: raw['skillsDir'] as string[],
       agentsDir: raw['agentsDir'] as string | undefined,
+      addDirs: raw['addDir'] as string[],
     };
 
     onMain(opts);

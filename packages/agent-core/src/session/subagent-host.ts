@@ -104,7 +104,7 @@ export class SessionSubagentHost {
     string,
     {
       readonly controller: AbortController;
-      readonly runInBackground: boolean;
+      runInBackground: boolean;
     }
   >();
 
@@ -276,6 +276,11 @@ export class SessionSubagentHost {
     }
   }
 
+  markActiveChildDetached(agentId: string): void {
+    const child = this.activeChildren.get(agentId);
+    if (child !== undefined) child.runInBackground = true;
+  }
+
   async getProfileName(agentId: string): Promise<string | undefined> {
     const metadata = this.session.metadata.agents[agentId];
     if (metadata?.type !== 'sub' || metadata.parentAgentId !== this.ownerAgentId) {
@@ -396,6 +401,7 @@ export class SessionSubagentHost {
     const context = await prepareSystemPromptContext(
       this.session.systemContextKaos(child.kaos.getcwd()),
       this.session.options.kimiHomeDir,
+      { additionalDirs: child.getAdditionalDirs() },
     );
     child.useProfile(profile, context);
     child.tools.inheritUserTools(parent.tools);
@@ -492,6 +498,9 @@ async function runChildTurnToCompletion(child: Agent, signal: AbortSignal): Prom
   const completion = await child.turn.waitForCurrentTurn(signal);
   const turnEnded = completion.event;
   if (turnEnded.reason !== 'completed') {
+    if (turnEnded.reason === 'filtered') {
+      throw new Error('Subagent turn blocked by provider safety policy');
+    }
     if (turnEnded.error?.code === ErrorCodes.PROVIDER_RATE_LIMIT) {
       throw providerRateLimitErrorFromPayload(turnEnded.error);
     }
