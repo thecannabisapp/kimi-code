@@ -2,8 +2,6 @@
 
 Plugins 把可复用的 Kimi Code CLI 能力打包成可安装单元——可以添加 [Agent Skills](./skills.md)、在会话启动时自动加载指定 Skill，也可以声明 MCP servers 来提供真实工具能力。适合把工作流共享给团队、连接外部服务，或从官方 marketplace 安装扩展。
 
-Kimi Code CLI 对 plugin 采用保守的加载策略：安装 plugin 时不会执行其中的 Python、Node.js、Shell、hook 或命令脚本。
-
 ## 安装与管理
 
 在 TUI 中运行 `/plugins` 打开 plugin 管理器。它是一个面板，有四个 tab：**Installed**（管理已装的）、**Official**（Kimi 官方 marketplace plugin）、**Third-party**（第三方 marketplace plugin）、**Custom**（从 URL 安装），用 `Tab` / `Shift-Tab` 切换。常用按键：
@@ -159,8 +157,72 @@ Plugin 是一个带 manifest 的目录或 zip 文件。Manifest 可以放在以�
 | `sessionStart.skill` | 在新会话或恢复会话开始时，把指定 plugin Skill 加载到主 Agent |
 | `skillInstructions` | 每次加载此 plugin 的 Skill 时一并附带的额外说明 |
 | `mcpServers` | MCP server 声明，默认启用，可从 `/plugins` 中禁用 |
+| `hooks` | 在 plugin 启用期间于生命周期事件上运行的 hook 规则；见[插件中的 Hooks](#插件中的-hooks) |
+| `commands` | 一个或多个 `./` 路径，指向目录或 `.md` 文件，把其中的 Markdown 文件注册为斜杠命令；见[插件斜杠命令](#插件斜杠命令) |
 
-`tools`、`commands`、`hooks`、`apps`、`inject`、`configFile` 等不支持的运行时字段会显示为 diagnostics 并被忽略。
+`tools`、`apps`、`inject`、`configFile` 等不支持的运行时字段会显示为 diagnostics 并被忽略。
+
+## 插件斜杠命令
+
+斜杠命令把一段常用提示词存成 `/命令`，输入它就能触发，省得每次重打。
+
+下面是一个最小完整例子，插件目录结构：
+
+```text
+kimi-finance/
+  kimi.plugin.json
+  commands/
+    report.md
+```
+
+manifest（`kimi.plugin.json`）用 `commands` 字段指出命令文件的位置：
+
+```json
+{
+  "name": "kimi-finance",
+  "version": "1.0.0",
+  "commands": "./commands/"
+}
+```
+
+命令文件 `commands/report.md`。顶部两行 `---` 之间是 frontmatter（描述命令的元数据），下面的正文是触发时发给 Agent 的提示词：
+
+```markdown
+---
+description: 拉取指定股票的财报并总结
+---
+
+拉取 $ARGUMENTS 的最新财报数据，总结营收、利润和关键风险。
+```
+
+装好并启用后，在对话里输入：
+
+```text
+/kimi-finance:report TSLA
+```
+
+Kimi 会把正文里的 `$ARGUMENTS` 替换成 `TSLA`，再执行这段提示词。三处细节分述如下。
+
+### 声明命令（`commands` 字段）
+
+`commands` 填一个 `./` 路径或路径数组，指向 plugin 根目录内的目录或 `.md` 文件：
+
+- 指向**目录**：递归收集其中所有 `.md` 文件，每个各成为一个命令。
+- 指向**单个 `.md` 文件**：只注册这一个。
+- 指向非 `.md` 或不存在的路径：显示为 diagnostics（`/plugins` 面板里的诊断提示）并被忽略。
+
+### 编写命令文件
+
+命令文件分两部分：可选的 **frontmatter**（顶部两行 `---` 之间的元数据，可写 `name`、`description`）和**正文**（`---` 之后的提示词）。两个字段省略时的回退规则：
+
+- `name`（命令名）：省略时用文件相对 `commands` 路径的路径命名（去 `.md`、`/` 分隔），如 `commands/frontend/component.md` → `frontend/component`；frontmatter 里显式写的优先。
+- `description`（命令列表里的说明）：省略时取正文首行非空文字（超 240 字符截断）；正文也为空则显示 `No description provided.`。
+
+### 调用命令与传参
+
+命令自动以插件 id 作前缀（即命名空间），注册成 `<插件名>:<命令名>`，所以上面的命令实际叫 `/kimi-finance:report`，不同插件的同名命令因此不会冲突。
+
+命令后输入的文字会替换正文里的 `$ARGUMENTS`（上例中 `TSLA` 替换掉 `$ARGUMENTS`）。若正文没写 `$ARGUMENTS` 却传了参数，参数不会丢弃，而是以 `ARGUMENTS: <你输入的内容>` 追加到正文末尾。
 
 ## Skills 与会话启动
 
@@ -221,11 +283,36 @@ Plugin MCP servers 会在 `/reload` 后或新会话中启动。启用或禁用�
 /reload
 ```
 
+## 插件中的 Hooks
+
+plugin 可以在其 manifest 中声明 hook 规则，在 plugin 启用期间于生命周期事件上运行。每一项使用与 [`config.toml` 中的 `[[hooks]]` 规则](./hooks.md#配置)相同的字段（`event`、`matcher`、`command`、`timeout`）：
+
+```json
+{
+  "hooks": [
+    {
+      "event": "PreToolUse",
+      "matcher": "Bash",
+      "command": "node ./hooks/check-bash.mjs",
+      "timeout": 5
+    }
+  ]
+}
+```
+
+plugin hooks 复用与全局 hooks 相同的机制——事件列表、stdin JSON 载荷以及退出码和返回值如何影响主流程，详见 [Hooks](./hooks.md)。区别如下：
+
+- plugin 的 hooks 仅在 plugin **启用**期间生效；禁用 plugin 后其 hooks 停止运行。
+- 每条 hook 的工作目录为 plugin 根目录，因此 `command` 可以使用 plugin 内的 `./` 路径。
+- hook 进程会额外收到两个环境变量：`KIMI_CODE_HOME` 和 `KIMI_PLUGIN_ROOT`（plugin 根目录）。
+
+仅安装 plugin 本身不会运行其 hooks——它们只在 plugin 启用期间、匹配的事件触发时运行。
+
 ## 安全模型
 
 Plugin 的加载范围有限，以下操作不会在安装或会话启动时发生：
 
-- 不会执行命令型 plugin tools、hooks 或旧式工具运行时
+- 不会执行命令型 plugin tools 或旧式工具运行时
 - 所有路径在解析符号链接后仍必须位于 plugin 根目录内
 - 已启用 plugin 的 MCP servers 会在 `/reload` 后或新会话中启动，且可随时从 `/plugins` 禁用
 - 损坏的 manifest 或不安全路径会显示在 `/plugins info <id>` 的 diagnostics 中，不影响其他会话

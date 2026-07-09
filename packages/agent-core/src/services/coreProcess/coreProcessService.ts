@@ -6,6 +6,7 @@ import { createRPC, KimiCore } from '../../rpc';
 import { Disposable, registerSingleton, SyncDescriptor } from '../../di';
 import type { CoreAPI, CoreRPC, SDKAPI } from '../../rpc';
 import type { OAuthTokenProviderResolver } from '../../session/provider-manager';
+import { noopTelemetryClient, type TelemetryClient } from '../../telemetry';
 import {
   createKimiDefaultHeaders,
   type KimiHostIdentity,
@@ -30,6 +31,10 @@ export class CoreProcessService extends Disposable implements ICoreProcessServic
    * directly. After dispose, the proxy rejects on every method invocation.
    */
   public readonly rpc: CoreRPC;
+
+  public readonly kimiRequestHeaders: Record<string, string> | undefined;
+
+  public readonly telemetry: TelemetryClient;
 
   /**
    * The in-process `KimiCore` instance. Kept private so daemon-side code can't
@@ -91,9 +96,10 @@ export class CoreProcessService extends Disposable implements ICoreProcessServic
     // synthesize from `options.identity`. Hosts that pass neither
     // (no identity, no headers) still construct — but their requests will
     // trip the 40340 guard.
-    const kimiRequestHeaders: Record<string, string> | undefined =
+    this.kimiRequestHeaders =
       options.kimiRequestHeaders ??
       CoreProcessService._defaultKimiRequestHeaders(env.homeDir, options.identity);
+    this.telemetry = options.telemetry ?? noopTelemetryClient;
 
     // `appVersion` flows into Session records (`app_version`) and tool
     // call ctx. Prefer explicit > identity.version so callers can pin
@@ -107,7 +113,7 @@ export class CoreProcessService extends Disposable implements ICoreProcessServic
       ...options,
       homeDir: env.homeDir,
       configPath: env.configPath,
-      kimiRequestHeaders,
+      kimiRequestHeaders: this.kimiRequestHeaders,
       appVersion,
       resolveOAuthTokenProvider,
     });

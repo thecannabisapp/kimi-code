@@ -1,6 +1,7 @@
 import { Disposable, IInstantiationService, InstantiationType, registerSingleton } from '../../di';
 import { Emitter } from '../../base/common/event';
 import { ErrorCodes, KimiError } from '../../errors';
+import { isRealUserInput } from '../../agent/compaction';
 import type { AgentContextData, ContextMessage } from '../../agent/context';
 import type { JsonObject, ListSessionsPayload, SessionSummary } from '../../rpc';
 import type { SessionMeta } from '../../session';
@@ -59,19 +60,12 @@ function canUndoHistory(history: readonly ContextMessage[], count: number): bool
     if (message === undefined) continue;
     if (message.origin?.kind === 'injection') continue;
     if (message.origin?.kind === 'compaction_summary') return false;
-    if (isRealUserPrompt(message)) {
+    if (isRealUserInput(message)) {
       found++;
       if (found >= count) return true;
     }
   }
   return false;
-}
-
-function isRealUserPrompt(message: ContextMessage): boolean {
-  if (message.role !== 'user') return false;
-  const origin = message.origin;
-  if (origin === undefined || origin.kind === 'user') return true;
-  return origin.kind === 'skill_activation' && origin.trigger === 'user-slash';
 }
 
 function pageContextMessages(
@@ -260,21 +254,26 @@ export class SessionService extends Disposable implements ISessionService {
     };
     const all = await this.core.rpc.listSessions(corePayload);
     const sorted = all.toSorted((a, b) => b.updatedAt - a.updatedAt);
+    // Hide sessions the user has never interacted with: a session is "empty" when
+    // it has no lastPrompt (the first prompt has not been sent yet). Filtered
+    // before cursor pagination so each returned page is filled with non-empty
+    // sessions and has_more reflects the filtered set.
+    const visible = query.excludeEmpty ? sorted.filter((s) => s.lastPrompt) : sorted;
 
     let pivotIndex = -1;
     if (query.before_id !== undefined) {
-      pivotIndex = sorted.findIndex((s) => s.id === query.before_id);
+      pivotIndex = visible.findIndex((s) => s.id === query.before_id);
     } else if (query.after_id !== undefined) {
-      pivotIndex = sorted.findIndex((s) => s.id === query.after_id);
+      pivotIndex = visible.findIndex((s) => s.id === query.after_id);
     }
 
-    let slice: typeof sorted;
+    let slice: typeof visible;
     if (query.before_id !== undefined && pivotIndex >= 0) {
-      slice = sorted.slice(pivotIndex + 1);
+      slice = visible.slice(pivotIndex + 1);
     } else if (query.after_id !== undefined && pivotIndex >= 0) {
-      slice = sorted.slice(0, pivotIndex);
+      slice = visible.slice(0, pivotIndex);
     } else {
-      slice = sorted;
+      slice = visible;
     }
 
     const requestedSize = query.page_size ?? DEFAULT_PAGE_SIZE;
@@ -464,7 +463,7 @@ export class SessionService extends Disposable implements ISessionService {
     return {
       status: this._computeStatus(id),
       model: config.modelAlias ?? config.provider?.model,
-      thinking_level: config.thinkingLevel,
+      thinking_level: config.thinkingEffort,
       permission: permission.mode,
       plan_mode: plan !== null,
       swarm_mode: agentState?.swarmMode ?? false,

@@ -6,7 +6,7 @@
  * user wheel-scroll up through earlier messages.
  */
 
-import { Container, type TUI } from '@earendil-works/pi-tui';
+import { Container, type TUI } from '@moonshot-ai/pi-tui';
 
 const WHEEL_SCROLL_LINES = 3;
 

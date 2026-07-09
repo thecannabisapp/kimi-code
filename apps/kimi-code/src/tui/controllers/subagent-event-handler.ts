@@ -2,6 +2,7 @@ import type {
   BackgroundTaskInfo,
   Event,
 } from '@moonshot-ai/kimi-code-sdk';
+
 import {
   AgentSwarmProgressComponent,
   agentSwarmDescriptionFromArgs,

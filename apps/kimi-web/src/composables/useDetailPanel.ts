@@ -7,6 +7,7 @@ import type { DetailTarget } from './useFilePreview';
 import type { useKimiWebClient } from './useKimiWebClient';
 import { buildEditDiffLines, extractEditPath, findToolCallById } from '../lib/toolDiff';
 import { toolLabel } from '../lib/toolMeta';
+import { toAgentMember } from './messagesToTurns';
 import { clampPanelWidth, panelMaxWidth, useViewportWidth } from './useViewportWidth';
 
 type KimiWebClient = ReturnType<typeof useKimiWebClient>;
@@ -124,30 +125,44 @@ export function useDetailPanel({
   // ---------------------------------------------------------------------------
   // Subagent detail panel
   // ---------------------------------------------------------------------------
-  const agentTarget = ref<{ turnId: string; blockIndex: number; memberId: string } | null>(null);
+  // Sourced from the live subagent task (not the message flow), so the panel
+  // keeps streaming a still-running subagent's `outputLines`. `agentTarget`
+  // holds the subagent task id; the open entry points are the `Agent` tool card
+  // (keyed by its tool-call id) and a background subagent chip in the dock
+  // (keyed by the task id) — both resolve to a task id here.
+  const agentTarget = ref<{ subagentId: string } | null>(null);
+
+  function resolveSubagentId(target: string): string | undefined {
+    const tasks = client.activeAppTasks.value;
+    const task =
+      tasks.find((tk) => tk.id === target) ?? tasks.find((tk) => tk.parentToolCallId === target);
+    if (task) return task.id;
+    // Same fallback as resolveAgentTaskId: a synthesized subagent task (missed
+    // spawn) has no parentToolCallId; if exactly one exists, open it.
+    const unmapped = tasks.filter((tk) => tk.kind === 'subagent' && !tk.parentToolCallId);
+    if (unmapped.length === 1) return unmapped[0]!.id;
+    return undefined;
+  }
 
   const agentPanelMember = computed<AgentMember | null>(() => {
     const target = agentTarget.value;
     if (!target) return null;
-    const turn = client.turns.value.find((tn) => tn.id === target.turnId);
-    const blk = turn?.blocks?.[target.blockIndex];
-    if (!blk) return null;
-    if (blk.kind === 'agent') return blk.member.id === target.memberId ? blk.member : null;
-    if (blk.kind === 'agentGroup') return blk.members.find((m) => m.id === target.memberId) ?? null;
-    return null;
+    const task = client.activeAppTasks.value.find((tk) => tk.id === target.subagentId);
+    return task ? toAgentMember(task) : null;
   });
 
   const agentPanelVisible = computed(() => agentPanelMember.value !== null);
 
-  function openAgentPanel(target: { turnId: string; blockIndex: number; memberId: string }): void {
-    const current = agentTarget.value;
-    if (current && current.turnId === target.turnId && current.memberId === target.memberId) {
+  function openAgentPanel(target: string): void {
+    const subagentId = resolveSubagentId(target);
+    if (!subagentId) return;
+    if (agentTarget.value?.subagentId === subagentId) {
       agentTarget.value = null;
       if (detailTarget.value === 'agent') detailTarget.value = null;
       return;
     }
+    agentTarget.value = { subagentId };
     detailTarget.value = 'agent';
-    agentTarget.value = target;
   }
 
   function closeAgentPanel(): void {
@@ -229,7 +244,15 @@ export function useDetailPanel({
   // Side chat (BTW) — now rendered in the unified right-side detail layer.
   // ---------------------------------------------------------------------------
   async function openSideChatTab(prompt?: string): Promise<void> {
-    await client.openSideChat(prompt);
+    // Empty-composer heal: `/btw [<question>]` from the new-session screen needs
+    // a parent session before openSideChat can start a BTW sub-agent. Create one
+    // in the active workspace (same path as the first prompt / a new-session
+    // skill / goal), then open the side chat on it.
+    if (!client.activeSessionId.value && client.activeWorkspaceId.value) {
+      await client.startSessionAndOpenSideChat(client.activeWorkspaceId.value, prompt);
+    } else {
+      await client.openSideChat(prompt);
+    }
     detailTarget.value = 'btw';
   }
 
@@ -261,6 +284,70 @@ export function useDetailPanel({
       transition is disabled so the panel follows the pointer 1:1. */
   const panelDragging = ref(false);
 
+  // ---------------------------------------------------------------------------
+  // Per-session panel snapshot (in-memory only). Switching sessions still closes
+  // the right-side detail layer, but for the transient panels whose content is
+  // re-derived from the session's turns (thinking / compaction / agent /
+  // toolDiff) or already stored per session (btw), we remember which one was
+  // open and restore it when the user switches back.
+  //
+  // File preview ('file') and git diff ('diff') are intentionally excluded:
+  // their content is tied to the active session's cwd / git state and is
+  // re-fetched on demand, so restoring them across sessions would be ambiguous.
+  // ---------------------------------------------------------------------------
+  type PanelSnapshot =
+    | { kind: 'thinking'; turnId: string; blockIndex: number }
+    | { kind: 'compaction'; turnId: string }
+    | { kind: 'agent'; subagentId: string }
+    | { kind: 'toolDiff'; toolId: string }
+    | { kind: 'btw' };
+
+  const snapshotBySession = ref<Record<string, PanelSnapshot>>({});
+
+  function captureSnapshot(): PanelSnapshot | null {
+    switch (detailTarget.value) {
+      case 'thinking':
+        return thinkingTarget.value ? { kind: 'thinking', ...thinkingTarget.value } : null;
+      case 'compaction':
+        return compactionTarget.value ? { kind: 'compaction', ...compactionTarget.value } : null;
+      case 'agent':
+        return agentTarget.value ? { kind: 'agent', ...agentTarget.value } : null;
+      case 'toolDiff':
+        return toolDiffToolId.value ? { kind: 'toolDiff', toolId: toolDiffToolId.value } : null;
+      case 'btw':
+        return { kind: 'btw' };
+      default:
+        return null;
+    }
+  }
+
+  function restoreSnapshot(snap: PanelSnapshot | undefined): void {
+    if (!snap) return;
+    switch (snap.kind) {
+      case 'thinking':
+        thinkingTarget.value = { turnId: snap.turnId, blockIndex: snap.blockIndex };
+        detailTarget.value = 'thinking';
+        break;
+      case 'compaction':
+        compactionTarget.value = { turnId: snap.turnId };
+        detailTarget.value = 'compaction';
+        break;
+      case 'agent':
+        agentTarget.value = { subagentId: snap.subagentId };
+        detailTarget.value = 'agent';
+        break;
+      case 'toolDiff':
+        toolDiffToolId.value = snap.toolId;
+        detailTarget.value = 'toolDiff';
+        break;
+      case 'btw':
+        // Only re-open the BTW panel if this session still has a live side chat;
+        // the snapshot can outlive it if the user closed the side chat explicitly.
+        if (client.sideChatVisible.value) detailTarget.value = 'btw';
+        break;
+    }
+  }
+
   // Escape closes whichever transient right-side detail panel is open.
   function closeOpenSidePanel(): boolean {
     if (detailTarget.value === 'thinking' && thinkingVisible.value) { closeThinkingPanel(); return true; }
@@ -273,7 +360,15 @@ export function useDetailPanel({
     return false;
   }
 
-  watch(client.activeSessionId, () => {
+  watch(client.activeSessionId, (newId, oldId) => {
+    // Remember the leaving session's open panel (restorable kinds only) before
+    // the close calls below wipe the target refs.
+    if (oldId) {
+      const snap = captureSnapshot();
+      if (snap) snapshotBySession.value[oldId] = snap;
+      else delete snapshotBySession.value[oldId];
+    }
+    // Close everything for the incoming session (unchanged behavior).
     closeFilePreview();
     closeThinkingPanel();
     closeCompactionPanel();
@@ -281,6 +376,10 @@ export function useDetailPanel({
     closeToolDiff();
     closeDiffDetail();
     hideSideChatPanel();
+    // Restore the entering session's panel, if it had one.
+    if (newId) {
+      restoreSnapshot(snapshotBySession.value[newId]);
+    }
   });
 
   return {

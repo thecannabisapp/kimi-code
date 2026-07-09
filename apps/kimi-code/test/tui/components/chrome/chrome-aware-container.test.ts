@@ -1,4 +1,4 @@
-import { Container, type Component } from '@earendil-works/pi-tui';
+import { Container, type Component } from '@moonshot-ai/pi-tui';
 import { describe, expect, it, vi } from 'vitest';
 
 import { ChromeAwareContainer } from '#/tui/components/chrome/chrome-aware-container';
@@ -7,7 +7,7 @@ function makeTUI(rows = 10) {
   return {
     terminal: { rows },
     requestRender: vi.fn(),
-  } as unknown as import('@earendil-works/pi-tui').TUI;
+  } as unknown as import('@moonshot-ai/pi-tui').TUI;
 }
 
 function makeLinesComponent(lines: string[]): Component {

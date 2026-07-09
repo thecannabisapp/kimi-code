@@ -9,7 +9,7 @@ import { MoonshotFetchURLProvider } from '#/tools/providers/moonshot-fetch-url';
 import { MoonshotWebSearchProvider } from '#/tools/providers/moonshot-web-search';
 import type { PromisableMethods } from '#/utils/types';
 import { getCoreVersion } from '#/version';
-import { resolveThinkingLevel } from '../agent/config/thinking';
+import { resolveThinkingEffort } from '../agent/config/thinking';
 import { Agent } from '../agent';
 import {
   ensureKimiHome,
@@ -42,6 +42,12 @@ import {
 import { Session, type SessionMeta, type SessionSkillConfig } from '../session';
 import { exportSessionDirectory } from '../session/export';
 import {
+  registerBuiltinSkills,
+  SessionSkillRegistry,
+  resolveSkillRoots,
+  summarizeSkill,
+} from '../skill';
+import {
   ProviderManager, type BearerTokenProvider,
   type OAuthTokenProviderResolver
 } from '../session/provider-manager';
@@ -57,6 +63,7 @@ import {
 import type { CoreRPCClient } from './client';
 import type {
   ActivateSkillPayload,
+  ActivatePluginCommandPayload,
   AddAdditionalDirPayload,
   AddAdditionalDirResult,
   ArchiveSessionPayload,
@@ -85,6 +92,7 @@ import type {
   GetPluginInfoPayload,
   InstallPluginPayload,
   ListSessionsPayload,
+  ListWorkspaceSkillsPayload,
   McpServerInfo,
   McpStartupMetrics,
   PluginInfo,
@@ -109,6 +117,7 @@ import type {
   SetPluginMcpServerEnabledPayload,
   SetThinkingPayload,
   SkillSummary,
+  PluginCommandDef,
   SteerPayload,
   StopBackgroundPayload,
   UndoHistoryPayload,
@@ -234,7 +243,9 @@ export class KimiCore implements PromisableMethods<CoreAPI> {
     const workDir = requiredWorkDir('createSession', options.workDir);
     const config = this.reloadProviderManager();
     const id = options.id ?? createSessionId();
-    const thinkingLevel = resolveThinkingLevel(options.thinking, config);
+    const modelAlias = options.model ?? config.defaultModel;
+    const model = modelAlias !== undefined ? config.models?.[modelAlias] : undefined;
+    const thinkingEffort = resolveThinkingEffort(options.thinking, config.thinking, model);
     const permissionMode = options.permission ?? config.defaultPermissionMode;
     const baseMcpConfig = await resolveSessionMcpConfig({
       cwd: workDir,
@@ -277,6 +288,7 @@ export class KimiCore implements PromisableMethods<CoreAPI> {
 
     await this.pluginsReady;
     const pluginSessionStarts = this.plugins.enabledSessionStarts();
+    const pluginCommands = await this.plugins.enabledCommands();
     const mcpConfig = this.mergePluginMcpConfig(withCallerMcp);
     const { profiles, initPrompt } = await this.resolveAgentProfiles();
 
@@ -301,16 +313,19 @@ export class KimiCore implements PromisableMethods<CoreAPI> {
       experimentalFlags: this.experimentalFlags,
       telemetry: sessionTelemetry,
       pluginSessionStarts,
+      pluginCommands,
       appVersion: this.appVersion,
       profiles,
       initPrompt,
       additionalDirs,
+      drainAgentTasksOnStop: options.drainAgentTasksOnStop,
     });
     try {
       session.metadata = {
         ...session.metadata,
         createdAt: new Date(summary.createdAt).toISOString(),
         updatedAt: new Date(summary.updatedAt).toISOString(),
+        workDir,
         ...(summary.title !== undefined
           ? {
               title: summary.title,
@@ -322,7 +337,7 @@ export class KimiCore implements PromisableMethods<CoreAPI> {
       const mainAgent = await session.createMain();
       mainAgent.config.update({
         modelAlias: options.model ?? config.defaultModel,
-        thinkingLevel,
+        thinkingEffort,
       });
       if (permissionMode !== undefined) {
         mainAgent.permission.setMode(permissionMode);
@@ -412,6 +427,7 @@ export class KimiCore implements PromisableMethods<CoreAPI> {
     const withCallerMcp = mergeCallerMcpServers(baseMcpConfig, input.mcpServers);
     await this.pluginsReady;
     const pluginSessionStarts = this.plugins.enabledSessionStarts();
+    const pluginCommands = await this.plugins.enabledCommands();
     const mcpConfig = this.mergePluginMcpConfig(withCallerMcp);
     const { profiles, initPrompt } = await this.resolveAgentProfiles();
     const runtime = await this.resolveRuntime(config);
@@ -436,6 +452,7 @@ export class KimiCore implements PromisableMethods<CoreAPI> {
       telemetry: withTelemetryContext(this.telemetry, { sessionId: summary.id }),
       initializeMainAgent: false,
       pluginSessionStarts,
+      pluginCommands,
       appVersion: this.appVersion,
       profiles,
       initPrompt,
@@ -711,6 +728,13 @@ export class KimiCore implements PromisableMethods<CoreAPI> {
     return this.sessionApi(sessionId).activateSkill(payload);
   }
 
+  activatePluginCommand({
+    sessionId,
+    ...payload
+  }: SessionAgentPayload<ActivatePluginCommandPayload>): Promise<void> {
+    return this.sessionApi(sessionId).activatePluginCommand(payload);
+  }
+
   getBackgroundOutput({ sessionId, ...payload }: SessionAgentPayload<GetBackgroundOutputPayload>) {
     return this.sessionApi(sessionId).getBackgroundOutput(payload);
   }
@@ -758,6 +782,44 @@ export class KimiCore implements PromisableMethods<CoreAPI> {
     return this.sessionApi(sessionId).listSkills(payload);
   }
 
+  /**
+   * List the skills available for a workspace working directory without
+   * requiring a session. Mirrors `Session.loadSkills` exactly (same roots,
+   * same discovery order, same built-ins) so the result matches what a new
+   * session created in `workDir` would see. Used to populate the composer
+   * skill menu before a session exists.
+   */
+  async listWorkspaceSkills({
+    workDir,
+  }: ListWorkspaceSkillsPayload): Promise<readonly SkillSummary[]> {
+    const cwd = requiredWorkDir('listWorkspaceSkills', workDir);
+    await this.pluginsReady;
+    const skills = this.resolveSessionSkillConfig(this.reloadProviderManager());
+    const roots = await resolveSkillRoots({
+      paths: {
+        userHomeDir: skills.userHomeDir ?? this.userHomeDir,
+        brandHomeDir: skills.brandHomeDir ?? this.homeDir,
+        workDir: cwd,
+      },
+      explicitDirs: skills.explicitDirs,
+      extraDirs: skills.extraDirs,
+      pluginSkillRoots: skills.pluginSkillRoots,
+      mergeAllAvailableSkills: skills.mergeAllAvailableSkills,
+      builtinDir: skills.builtinDir,
+    });
+    const registry = new SessionSkillRegistry({});
+    await registry.loadRoots(roots);
+    registerBuiltinSkills(registry);
+    return registry.listSkills().map(summarizeSkill);
+  }
+
+  listPluginCommands({
+    sessionId,
+    ...payload
+  }: SessionScopedPayload<EmptyPayload>): readonly PluginCommandDef[] {
+    return this.sessionApi(sessionId).listPluginCommands(payload);
+  }
+
   listMcpServers({
     sessionId,
     ...payload
@@ -785,6 +847,10 @@ export class KimiCore implements PromisableMethods<CoreAPI> {
 
   getSessionWarnings({ sessionId, ...payload }: SessionScopedPayload<EmptyPayload>): Promise<readonly SessionWarning[]> {
     return this.sessionApi(sessionId).getSessionWarnings(payload);
+  }
+
+  waitForBackgroundTasksOnPrint({ sessionId, ...payload }: SessionScopedPayload<EmptyPayload>): Promise<void> {
+    return this.sessionApi(sessionId).waitForBackgroundTasksOnPrint(payload);
   }
 
   addAdditionalDir({
@@ -1179,19 +1245,16 @@ function telemetryErrorReason(error: unknown): string {
 
 function clientTelemetryProperties(client: ClientTelemetryInfo | undefined): TelemetryProperties {
   if (client === undefined) return {};
-  const properties: Record<string, string> = {};
-  addNonEmpty(properties, 'client_id', client.id);
-  addNonEmpty(properties, 'client_name', client.name);
-  addNonEmpty(properties, 'client_version', client.version);
-  addNonEmpty(properties, 'ui_mode', client.uiMode);
-  return properties;
-}
-
-function addNonEmpty(target: Record<string, string>, key: string, value: string | undefined): void {
-  const trimmed = value?.trim();
-  if (trimmed !== undefined && trimmed.length > 0) {
-    target[key] = trimmed;
-  }
+  // Emit a fixed key set (null when the client did not provide a field) so
+  // `session_started` has a stable schema across clients, matching the harness
+  // producer in `kimi-harness.ts`. Other session events also inherit these as
+  // context properties, so they share the same stable client-attribution shape.
+  return {
+    client_id: client.id ?? null,
+    client_name: client.name ?? null,
+    client_version: client.version ?? null,
+    ui_mode: client.uiMode ?? null,
+  };
 }
 
 async function resumeSessionResult(
