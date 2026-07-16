@@ -95,6 +95,7 @@ export interface AgentRecordEvents {
 
   'context.append_message': { message: ContextMessage };
   'context.append_loop_event': { event: LoopRecordedEvent };
+  'context.update_token_count': { tokenCount: number };
   'context.clear': {};
   'context.apply_compaction': CompactionResult;
   'context.undo': { count: number };
@@ -177,8 +178,9 @@ export interface AgentRecordEvents {
     messageCount: number;
     turnStep?: string;
     attempt?: string;
-    /** Set when this request is the strict wire-compliant rebuild resend. */
-    projection?: 'strict';
+    /** Set when this request is a fallback resend (strict rebuild,
+     * media-degraded rebuild, or media-stripped rebuild). */
+    projection?: 'strict' | 'media-degraded' | 'media-stripped';
     /** Compaction only: messages dropped so far by overflow/empty shrinking. */
     droppedCount?: number;
   };

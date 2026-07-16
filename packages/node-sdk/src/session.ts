@@ -14,8 +14,10 @@ import type {
   BackgroundTaskInfo,
   CompactOptions,
   CreateGoalInput,
+  GetCronTasksResult,
   GoalSnapshot,
   GoalToolResult,
+  JsonObject,
   McpServerInfo,
   McpStartupMetrics,
   PermissionMode,
@@ -216,6 +218,30 @@ export class Session {
     await this.rpc.setPermission({ sessionId: this.id, mode });
   }
 
+  /** Shallow-merge host-owned fields into this session's persisted custom metadata. */
+  async updateMetadata(patch: JsonObject): Promise<void> {
+    this.ensureOpen();
+    if (Object.hasOwn(patch, 'goal')) {
+      throw new KimiError(
+        ErrorCodes.GOAL_METADATA_RESERVED,
+        'Session metadata key "goal" is reserved for the goal lifecycle',
+      );
+    }
+    const summary = this.requireSummary();
+    await this.rpc.updateSessionMetadata({ sessionId: this.id, metadata: patch });
+    const metadata = { ...summary.metadata, ...patch };
+    this.summary = { ...summary, metadata };
+    if (this.resumeState !== undefined) {
+      this.resumeState = {
+        ...this.resumeState,
+        sessionMetadata: {
+          ...this.resumeState.sessionMetadata,
+          custom: { ...this.resumeState.sessionMetadata.custom, ...patch },
+        },
+      };
+    }
+  }
+
   async setPlanMode(enabled: boolean): Promise<void> {
     this.ensureOpen();
     if (typeof enabled !== 'boolean') {
@@ -269,6 +295,18 @@ export class Session {
   async undoHistory(count: number = 1): Promise<void> {
     this.ensureOpen();
     await this.rpc.undoHistory({ sessionId: this.id, count });
+  }
+
+  /** Clear this session's model context without creating a new session. */
+  async clearContext(): Promise<void> {
+    this.ensureOpen();
+    await this.rpc.clearContext({ sessionId: this.id });
+  }
+
+  /** Append imported text to this session's context without prompting the model. */
+  async importContext(content: string, source: string): Promise<void> {
+    this.ensureOpen();
+    await this.rpc.importContext({ sessionId: this.id, content, source });
   }
 
   async getContext(): Promise<AgentContextData> {
@@ -380,13 +418,27 @@ export class Session {
   /**
    * Block until every still-running background task (across all agents in this
    * session) reaches a terminal state. Used by `kimi -p` after the main agent's
-   * turn finishes when `background.keep_alive_on_exit` is `true`, so background
-   * subagents get a chance to complete before the process exits. No-op when
-   * `keep_alive_on_exit` is not enabled. Bounded by `background.print_wait_ceiling_s`.
+   * turn finishes when the resolved print background mode is `'drain'`
+   * (`print_background_mode = "drain"`, or the legacy `keep_alive_on_exit = true`
+   * fallback), so background subagents get a chance to complete before the process
+   * exits. No-op in other modes. Bounded by `background.print_wait_ceiling_s`.
    */
   async waitForBackgroundTasksOnPrint(): Promise<void> {
     this.ensureOpen();
     await this.rpc.waitForBackgroundTasksOnPrint({ sessionId: this.id });
+  }
+
+  /**
+   * Used by `kimi -p` after the main agent's turn ends with `reason ===
+   * 'completed'`. Returns `'finish'` when the run may exit, or `'continue'` when
+   * the caller must keep the session alive so a background-task completion can
+   * steer the main agent into a new turn. Policy is selected by
+   * `background.print_background_mode` (`'exit' | 'drain' | 'steer'`); when unset
+   * it falls back to the legacy `keep_alive_on_exit` mapping (`true ⇒ 'drain'`).
+   */
+  async handlePrintMainTurnCompleted(): Promise<'finish' | 'continue'> {
+    this.ensureOpen();
+    return this.rpc.handlePrintMainTurnCompleted({ sessionId: this.id });
   }
 
   // --- Goal lifecycle ---------------------------------------------------
@@ -418,6 +470,16 @@ export class Session {
   async cancelGoal(): Promise<GoalSnapshot> {
     this.ensureOpen();
     return this.rpc.cancelGoal({ sessionId: this.id });
+  }
+
+  /**
+   * Enumerate the cron tasks scheduled in this session. Hosts running a
+   * bounded session lifetime (e.g. `kimi -p`) poll this to decide whether
+   * pending scheduled work still needs the process alive.
+   */
+  async getCronTasks(): Promise<GetCronTasksResult> {
+    this.ensureOpen();
+    return this.rpc.getCronTasks({ sessionId: this.id });
   }
 
   async listMcpServers(): Promise<readonly McpServerInfo[]> {

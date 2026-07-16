@@ -10,6 +10,7 @@ export * from './plugin';
 export { buildReplay } from './agent/replay/build';
 export {
   flushDiagnosticLogs,
+  flushDiagnosticLogsSync,
   getRootLogger,
   log,
   redact,
@@ -45,6 +46,7 @@ export type {
   ProcessBackgroundTaskInfo,
   QuestionBackgroundTaskInfo,
 } from './agent/background';
+export type { CronTaskSnapshot } from './agent/cron';
 export type { ToolServices } from './tools/support/services';
 
 // Image compression — prompt-ingestion sites (CLI paste, server upload
@@ -64,9 +66,25 @@ export {
   compressImageContentParts,
   cropImageForModel,
   formatByteSize,
+  gateImageFormatParts,
+  resolveMaxImageEdgePx,
+  resolveReadImageByteBudget,
   IMAGE_BYTE_BUDGET,
   MAX_IMAGE_EDGE_PX,
+  READ_IMAGE_BYTE_BUDGET,
 } from './tools/support/image-compress';
+export {
+  MODEL_ACCEPTED_IMAGE_MIMES,
+  buildImageConversionGuidance,
+  buildUnsupportedImageNotice,
+  decodeBase64Prefix,
+  isModelAcceptedImageMime,
+  normalizeImageMime,
+  parseImageDataUrl,
+  resolveEffectiveImageMime,
+  unsupportedImageMimeFromUrl,
+} from './tools/support/image-format-policy';
+export { ImageLimits } from './tools/support/image-limits';
 export type {
   CompressAnnotateOptions,
   CompressedContentParts,

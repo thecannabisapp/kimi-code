@@ -20,9 +20,14 @@ import {
   ratioSeverity,
   renderProgressBar,
   safeUsageRatio,
+  usagePercent,
 } from '#/utils/usage/usage-format';
 
-import { buildManagedUsageReportLines, type ManagedUsageReport } from './usage-panel';
+import {
+  buildExtraUsageSection,
+  buildManagedUsageReportLines,
+  type ManagedUsageReport,
+} from './usage-panel';
 
 interface FieldRow {
   readonly label: string;
@@ -129,7 +134,7 @@ export function buildStatusReportLines(options: StatusReportOptions): string[] {
     const bar = renderProgressBar(safeRatio, 20);
     const barColoured = currentTheme.fg(severityToken(ratioSeverity(safeRatio)), bar);
     lines.push(
-      `  ${barColoured}  ${value(`${(safeRatio * 100).toFixed(1)}%`.padStart(6, ' '))}  ` +
+      `  ${barColoured}  ${value(`${String(usagePercent(tokens, maxTokens))}%`.padStart(6, ' '))}  ` +
         muted(`(${formatTokenCount(tokens)} / ${formatTokenCount(maxTokens)})`),
     );
   } else {
@@ -143,6 +148,17 @@ export function buildStatusReportLines(options: StatusReportOptions): string[] {
   if (managedSection.length > 0) {
     lines.push('');
     lines.push(...managedSection);
+  }
+
+  const extraSection = buildExtraUsageSection(
+    options.managedUsage?.extraUsage,
+    accent,
+    value,
+    muted,
+  );
+  if (extraSection.length > 0) {
+    lines.push('');
+    lines.push(...extraSection);
   }
 
   return lines;

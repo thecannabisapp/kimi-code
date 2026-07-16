@@ -24,6 +24,7 @@ export type {
   BackgroundTaskStatus,
   ConfigDiagnostics,
   ContextMessage,
+  CronTaskSnapshot,
   ExperimentalFeatureState,
   ExperimentalFlagMap,
   ExperimentalFlagSource,
@@ -32,6 +33,7 @@ export type {
   GoalBudgetReport,
   GoalChange,
   GoalChangeStats,
+  GetCronTasksResult,
   GoalSnapshot,
   GoalStatus,
   GoalToolResult,
@@ -62,6 +64,8 @@ export type {
   SkillSummary,
   ThinkingConfig,
   ToolInfo,
+  GlobalMcpServerConfig as McpServerConfig,
+  GlobalMcpServerTestResult as McpTestResult,
 } from '@moonshot-ai/agent-core';
 
 export type { KimiHostIdentity, OAuthRefreshOutcome };
@@ -125,6 +129,8 @@ export interface ResumeSessionInput {
   readonly kaos?: Kaos | undefined;
   readonly persistenceKaos?: Kaos | undefined;
   readonly additionalDirs?: readonly string[];
+  /** Include persisted subagent states in the returned replay snapshot. */
+  readonly includeSubagents?: boolean;
   readonly sessionStartedProperties?: TelemetryProperties;
 }
 
@@ -139,6 +145,8 @@ export interface AddAdditionalDirInput {
 }
 
 export interface AddAdditionalDirOptions {
+  /** When true, share the directory through workspace local config. When false,
+   * keep it scoped to this session while still restoring it on session resume. */
   readonly persist: boolean;
 }
 
@@ -147,6 +155,11 @@ export interface ForkSessionInput {
   readonly forkId?: string;
   readonly title?: string;
   readonly metadata?: JsonObject;
+  /**
+   * Zero-based index of the user-visible turn to retain through. Omit it to
+   * preserve the existing full-session fork behavior.
+   */
+  readonly turnIndex?: number;
 }
 
 export interface ExportSessionInput {
@@ -174,6 +187,18 @@ export interface ListSessionsOptions {
 
 export interface GetConfigOptions {
   readonly reload?: boolean | undefined;
+}
+
+export interface AuthenticateMcpServerOptions {
+  readonly onAuthorizationUrl: (
+    url: string,
+  ) => void | boolean | PromiseLike<void | boolean>;
+  readonly signal?: AbortSignal;
+  readonly timeoutMs?: number;
+}
+
+export interface TestMcpServerOptions {
+  readonly cwd?: string;
 }
 
 export interface CompactOptions {

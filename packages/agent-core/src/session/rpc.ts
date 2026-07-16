@@ -16,6 +16,7 @@ import type {
   EnterSwarmPayload,
   GetBackgroundOutputPayload,
   GetBackgroundPayload,
+  ImportContextPayload,
   McpServerInfo,
   McpStartupMetrics,
   PromptPayload,
@@ -109,6 +110,10 @@ export class SessionAPIImpl implements PromisableMethods<SessionAPI> {
 
   waitForBackgroundTasksOnPrint(_payload: EmptyPayload): Promise<void> {
     return this.session.waitForBackgroundTasksOnPrint();
+  }
+
+  handlePrintMainTurnCompleted(_payload: EmptyPayload): Promise<'finish' | 'continue'> {
+    return this.session.handlePrintMainTurnCompleted();
   }
 
   addAdditionalDir(payload: AddAdditionalDirPayload): Promise<AddAdditionalDirResult> {
@@ -214,6 +219,10 @@ export class SessionAPIImpl implements PromisableMethods<SessionAPI> {
     return (await this.getAgent(agentId)).clearContext(payload);
   }
 
+  async importContext({ agentId, ...payload }: AgentScopedPayload<ImportContextPayload>) {
+    return (await this.getAgent(agentId)).importContext(payload);
+  }
+
   async activateSkill({ agentId, ...payload }: AgentScopedPayload<ActivateSkillPayload>) {
     await (await this.getAgent(agentId)).activateSkill(payload);
     if (agentId === 'main') {
@@ -253,6 +262,10 @@ export class SessionAPIImpl implements PromisableMethods<SessionAPI> {
 
   async cancelGoal({ agentId, ...payload }: AgentScopedPayload<EmptyPayload>) {
     return (await this.getAgent(agentId)).cancelGoal(payload);
+  }
+
+  async getCronTasks({ agentId, ...payload }: AgentScopedPayload<EmptyPayload>) {
+    return (await this.getAgent(agentId)).getCronTasks(payload);
   }
 
   async getBackgroundOutput({

@@ -18,7 +18,7 @@ import {
   isMaxStepsExceededError,
 } from './errors';
 import type { LoopInterruptReason, LoopEventDispatcher, LoopTurnInterruptedEvent } from './events';
-import type { LLM } from './llm';
+import type { LLM, LLMRequestTrace } from './llm';
 import { executeLoopStep } from './turn-step';
 import type {
   ExecutableTool,
@@ -41,6 +41,24 @@ export interface RunTurnInput {
    * a tool_use/tool_result adjacency 400 (see `executeLoopStep`).
    */
   readonly buildMessagesStrict?: LoopMessageBuilder | undefined;
+  /**
+   * Optional media-degraded rebuild of the request messages: old media parts
+   * replaced by text markers, the most recent kept. Used to resend once after
+   * the provider rejects the request body as too large (HTTP 413 on
+   * accumulated media, see `executeLoopStep`); after a successful degraded
+   * resend, later steps of the same turn build from this projection directly
+   * so each step does not pay a fresh rejection.
+   */
+  readonly buildMessagesMediaDegraded?: LoopMessageBuilder | undefined;
+  /**
+   * Optional media-stripped rebuild of the request messages: EVERY media
+   * part replaced by a text marker. Used to resend once after the provider
+   * rejects an image's format, or as the final fallback when a request stays
+   * too large after keeping only recent media (see `executeLoopStep`). After
+   * a successful stripped resend, later steps of the same turn build from
+   * this projection directly.
+   */
+  readonly buildMessagesMediaStripped?: LoopMessageBuilder | undefined;
   readonly dispatchEvent: LoopEventDispatcher;
   readonly tools?: readonly ExecutableTool[] | undefined;
   /**
@@ -65,6 +83,7 @@ export interface RunTurnInput {
   readonly recordStepUsage?:
     | ((usage: TokenUsage) => RecordStepUsageResult | void | Promise<RecordStepUsageResult | void>)
     | undefined;
+  readonly onRequestTrace?: (trace: LLMRequestTrace) => void;
 }
 
 export async function runTurn(input: RunTurnInput): Promise<TurnResult> {
@@ -74,6 +93,8 @@ export async function runTurn(input: RunTurnInput): Promise<TurnResult> {
     llm,
     buildMessages,
     buildMessagesStrict,
+    buildMessagesMediaDegraded,
+    buildMessagesMediaStripped,
     dispatchEvent,
     tools,
     buildTools,
@@ -83,17 +104,32 @@ export async function runTurn(input: RunTurnInput): Promise<TurnResult> {
     maxSteps,
     maxRetryAttempts,
     recordStepUsage: hostRecordStepUsage,
+    onRequestTrace,
   } = input;
   let usage: TokenUsage = emptyUsage();
   let steps = 0;
   // Normal exits overwrite this with the completed step's stop reason.
   let stopReason: LoopTurnStopReason = 'end_turn';
   let activeStep: number | undefined;
+  let activeRequestTrace: LLMRequestTrace | undefined;
+  // Once a step only succeeded via the media-degraded resend, later steps of
+  // this turn build from the degraded projection directly: the full-media
+  // history is deterministically over the provider's body-size limit, so
+  // rebuilding it would pay a fresh rejection on every step.
+  let mediaDegradedActive = false;
+  // Same for the media-stripped resend after an image-format rejection or a
+  // second 413: the rejected media is still in history, so later steps stay
+  // stripped.
+  let mediaStrippedActive = false;
   const recordStepUsage = async (
     stepUsage: TokenUsage,
   ): Promise<RecordStepUsageResult | void> => {
     usage = addUsage(usage, stepUsage);
     return hostRecordStepUsage?.(stepUsage);
+  };
+  const captureRequestTrace = (trace: LLMRequestTrace): void => {
+    activeRequestTrace = trace;
+    onRequestTrace?.(trace);
   };
 
   try {
@@ -106,11 +142,24 @@ export async function runTurn(input: RunTurnInput): Promise<TurnResult> {
 
       steps += 1;
       activeStep = steps;
+      activeRequestTrace = undefined;
       const stepResult = await executeLoopStep({
         turnId,
         signal,
-        buildMessages,
+        buildMessages:
+          mediaStrippedActive && buildMessagesMediaStripped !== undefined
+            ? buildMessagesMediaStripped
+            : mediaDegradedActive && buildMessagesMediaDegraded !== undefined
+              ? buildMessagesMediaDegraded
+              : buildMessages,
+        initialMediaProjection: mediaStrippedActive
+          ? 'media-stripped'
+          : mediaDegradedActive
+            ? 'media-degraded'
+            : 'normal',
         buildMessagesStrict,
+        buildMessagesMediaDegraded,
+        buildMessagesMediaStripped,
         dispatchEvent,
         llm,
         tools,
@@ -125,8 +174,11 @@ export async function runTurn(input: RunTurnInput): Promise<TurnResult> {
         currentStep: steps,
         maxRetryAttempts,
         recordUsage: recordStepUsage,
+        onRequestTrace: captureRequestTrace,
       });
       activeStep = undefined;
+      mediaDegradedActive = mediaDegradedActive || stepResult.mediaDegradedResendUsed === true;
+      mediaStrippedActive = mediaStrippedActive || stepResult.mediaStrippedResendUsed === true;
 
       if (stepResult.stopReason === 'tool_use') {
         continue;
@@ -154,11 +206,29 @@ export async function runTurn(input: RunTurnInput): Promise<TurnResult> {
       // programmatic abort so telemetry can tell the two apart.
       const interruptReason =
         isUserCancellation(signal.reason) || isUserCancellation(error) ? 'user_cancelled' : 'aborted';
-      dispatchEvent(makeInterruptedEvent('aborted', steps, activeStep, undefined, interruptReason));
+      dispatchEvent(
+        makeInterruptedEvent(
+          'aborted',
+          steps,
+          activeStep,
+          undefined,
+          interruptReason,
+          activeRequestTrace?.traceId,
+        ),
+      );
       return { stopReason: 'aborted', steps, usage };
     }
     const reason: LoopInterruptReason = isMaxStepsExceededError(error) ? 'max_steps' : 'error';
-    dispatchEvent(makeInterruptedEvent(reason, steps, activeStep, errorMessage(error)));
+    dispatchEvent(
+      makeInterruptedEvent(
+        reason,
+        steps,
+        activeStep,
+        errorMessage(error),
+        reason,
+        activeRequestTrace?.traceId,
+      ),
+    );
     throw error;
   }
 
@@ -171,6 +241,7 @@ function makeInterruptedEvent(
   activeStep: number | undefined,
   message?: string | undefined,
   interruptReason: LoopTurnInterruptedEvent['interruptReason'] = reason,
+  traceId?: string,
 ): LoopTurnInterruptedEvent {
   return {
     type: 'turn.interrupted',
@@ -179,5 +250,6 @@ function makeInterruptedEvent(
     ...(activeStep !== undefined ? { activeStep } : {}),
     ...(message !== undefined ? { message } : {}),
     interruptReason,
+    traceId,
   };
 }

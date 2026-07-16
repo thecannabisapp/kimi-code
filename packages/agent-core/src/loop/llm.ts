@@ -33,8 +33,11 @@ export interface LLMRequestLogFields {
   readonly attempt?: string;
   /** Request purpose; absent means a regular loop step. */
   readonly kind?: 'loop' | 'compaction';
-  /** Set when the messages are the strict wire-compliant rebuild resend. */
-  readonly projection?: 'strict';
+  /** Set when the messages are a fallback resend projection: the strict
+   * wire-compliant rebuild, the media-degraded rebuild after a
+   * request-too-large rejection, or the media-stripped rebuild after an
+   * image-format rejection / a second request-too-large rejection. */
+  readonly projection?: 'strict' | 'media-degraded' | 'media-stripped';
   /** Compaction only: messages dropped so far by overflow/empty shrinking. */
   readonly droppedCount?: number;
 }
@@ -65,6 +68,22 @@ export interface LLMStreamTiming {
   readonly clientConsumeMs?: number;
 }
 
+export interface LLMRequestTrace {
+  readonly traceId: string | undefined;
+}
+
+export class LLMRequestTraceState implements LLMRequestTrace {
+  traceId: string | undefined;
+
+  reset(): void {
+    this.traceId = undefined;
+  }
+
+  capture(traceId: string | null | undefined): void {
+    this.traceId = traceId ?? undefined;
+  }
+}
+
 export interface LLMChatParams {
   messages: Message[];
   tools: readonly Tool[];
@@ -87,6 +106,7 @@ export interface LLMChatParams {
    * order. Durable transcript writes receive completed blocks only.
    */
   onThinkPart?: ((part: ThinkPart) => Promise<void> | void) | undefined;
+  trace?: LLMRequestTraceState;
 }
 
 export interface LLMChatResponse {
@@ -96,6 +116,8 @@ export interface LLMChatResponse {
   messageId?: string;
   usage: TokenUsage;
   streamTiming?: LLMStreamTiming;
+  /** Provider trace identifier from the `x-trace-id` response header (Kimi/KFC only). */
+  traceId?: string;
 }
 
 export interface LLM {

@@ -8,12 +8,15 @@ import {
   APIEmptyResponseError,
   inputTotal,
   isRetryableGenerateError,
+  type ContentPart,
   type GenerateResult,
   type Message,
   type TokenUsage,
   APIContextOverflowError,
+  APIRequestTooLargeError,
   APIStatusError,
   createUserMessage,
+  isImageFormatError,
 } from '@moonshot-ai/kosong';
 
 import type { Agent } from '..';
@@ -22,9 +25,11 @@ import type { ContextMessage } from '../context/types';
 import { stripDynamicToolContext } from '../context/dynamic-tools';
 import { isAbortError } from '../../loop/errors';
 import {
+  findAPIStatusError,
   retryBackoffDelays,
   sleepForRetry,
 } from '../../loop/retry';
+import { LLMRequestTraceState } from '../../loop/llm';
 import {
   renderTodoList,
   TODO_STORE_KEY,
@@ -83,6 +88,11 @@ export class FullCompaction {
   // stop an overflow -> compact -> overflow loop when compaction can no
   // longer shrink the request below the model window.
   private consecutiveOverflowCompactions = 0;
+  // Trace id (`x-trace-id`, Kimi/KFC only) of the latest summarizer request,
+  // updated on every attempt — success or failure — so a compaction cancelled
+  // mid-request can still be attributed to its server-side request.
+  private lastSummarizerTraceId: string | undefined;
+  private activeSummarizerTrace: LLMRequestTraceState | undefined;
   protected readonly strategy: CompactionStrategy;
 
   constructor(
@@ -104,6 +114,13 @@ export class FullCompaction {
 
   get isCompacting(): boolean {
     return this.compacting !== null;
+  }
+
+  /** Trace id (`x-trace-id`, Kimi/KFC only) of the latest summarizer request. */
+  get lastTraceId(): string | undefined {
+    return this.activeSummarizerTrace !== undefined
+      ? this.activeSummarizerTrace.traceId
+      : this.lastSummarizerTraceId;
   }
 
   getEffectiveMaxContextTokens(): number {
@@ -387,6 +404,10 @@ export class FullCompaction {
     const originalHistory = [...this.agent.context.history];
     const tokensBefore = estimateTokensForMessages(originalHistory);
     let retryCount = 0;
+    // Reset per round: a failure before any response headers arrive (network
+    // error / local abort) must report no trace id, not a previous round's.
+    this.lastSummarizerTraceId = undefined;
+    this.activeSummarizerTrace = undefined;
     try {
       await this.triggerPreCompactHook(data, tokensBefore, signal);
 
@@ -430,6 +451,7 @@ export class FullCompaction {
       // prefix-race check and `compactedCount`.
       let historyForModel: readonly ContextMessage[] = stripDynamicToolContext(originalHistory);
       let droppedCount = 0;
+      let mediaStripAttempted = false;
       let overflowShrinkCount = 0;
       let emptyOrTruncatedShrinkCount = 0;
       while (true) {
@@ -446,9 +468,14 @@ export class FullCompaction {
         ];
         const estimatedCompactionRequestTokens = this.estimateRequestTokens(messages);
         try {
+          const trace = new LLMRequestTraceState();
+          this.activeSummarizerTrace = trace;
           const generateOptions: GenerateOptionsWithRequestLogFields = {
             signal,
             requestLogFields: { kind: 'compaction', droppedCount },
+            onTraceId: (traceId) => {
+              trace.capture(traceId);
+            },
           };
           const response = await this.agent.generate(
             provider,
@@ -458,6 +485,9 @@ export class FullCompaction {
             undefined,
             generateOptions,
           );
+          // Multi-round compaction keeps the latest round's request trace id.
+          this.lastSummarizerTraceId = response.traceId ?? undefined;
+          this.activeSummarizerTrace = undefined;
           if (response.finishReason === 'truncated') {
             throw new CompactionTruncatedError();
           }
@@ -465,6 +495,34 @@ export class FullCompaction {
           summary = extractCompactionSummary(response);
           break;
         } catch (error) {
+          // A failed request usually still returns response headers, so its
+          // trace id rides along on the converted status error.
+          const statusError = findAPIStatusError(error);
+          if (statusError?.traceId !== null && statusError?.traceId !== undefined) {
+            this.activeSummarizerTrace?.capture(statusError.traceId);
+          }
+          // A request-body-size rejection (HTTP 413) or an image-format
+          // rejection is first retried with media parts replaced by text
+          // markers: accumulated base64 payloads are the usual 413 culprit,
+          // a poisoned image the format-rejection culprit, and a text summary
+          // needs neither — the conversation already narrates what was seen,
+          // and the ReadMediaFile `<image path="...">` text wrapper survives.
+          // Only the summarizer input copy is rewritten; the real history
+          // keeps its media. A rejection after the strip (or with no media to
+          // strip) falls through to the overflow shrink below for a 413, and
+          // propagates for a format error — dropping oldest messages cannot
+          // fix a poisoned image's format.
+          const mediaRejected =
+            error instanceof APIRequestTooLargeError || isImageFormatError(error);
+          if (mediaRejected && !mediaStripAttempted) {
+            mediaStripAttempted = true;
+            const stripped = replaceMediaPartsWithMarkers(historyForModel);
+            if (stripped !== historyForModel) {
+              historyForModel = stripped;
+              retryCount = 0;
+              continue;
+            }
+          }
           const isContextOverflow = this.shouldRecoverFromContextOverflow(
             error,
             estimatedCompactionRequestTokens,
@@ -472,7 +530,9 @@ export class FullCompaction {
           if (isContextOverflow) {
             this.observeContextOverflow(estimatedCompactionRequestTokens);
           }
-          if (isContextOverflow && historyForModel.length > 1) {
+          const shouldShrinkAfterOverflow =
+            isContextOverflow || error instanceof APIRequestTooLargeError;
+          if (shouldShrinkAfterOverflow && historyForModel.length > 1) {
             overflowShrinkCount += 1;
             if (overflowShrinkCount > MAX_COMPACTION_OVERFLOW_SHRINK_ATTEMPTS) {
               throw error;
@@ -573,6 +633,7 @@ export class FullCompaction {
         retry_count: retryCount,
         round: 1,
         thinking_effort: this.agent.config.thinkingEffort,
+        trace_id: this.lastTraceId,
         ...(usage === null
           ? {}
           : { input_tokens: inputTotal(usage), output_tokens: usage.output }),
@@ -594,6 +655,7 @@ export class FullCompaction {
         retry_count: retryCount,
         thinking_effort: this.agent.config.thinkingEffort,
         error_type: error instanceof Error ? error.name : 'Unknown',
+        trace_id: this.lastTraceId,
       });
       if (
         isKimiError(error) &&
@@ -638,6 +700,40 @@ export class FullCompaction {
 
 const MAX_COMPACTION_OVERFLOW_SHRINK_ATTEMPTS = 3;
 const COMPACTION_OVERFLOW_SHRINK_RATIOS = [0.7, 0.5, 0.35] as const;
+
+const MEDIA_PART_MARKERS = {
+  image_url: '[image]',
+  audio_url: '[audio]',
+  video_url: '[video]',
+} as const;
+
+function isMediaPart(part: ContentPart): part is ContentPart & { type: keyof typeof MEDIA_PART_MARKERS } {
+  return part.type in MEDIA_PART_MARKERS;
+}
+
+/**
+ * Replace media parts (image/audio/video) with text markers in the summarizer
+ * input, for the 413 strip-and-retry above. Messages without media are
+ * returned by reference (keeping the per-message token-estimate cache warm),
+ * and when nothing changed the input array itself is returned so the caller
+ * can tell there was no media to strip.
+ */
+function replaceMediaPartsWithMarkers(
+  messages: readonly ContextMessage[],
+): readonly ContextMessage[] {
+  let changed = false;
+  const out = messages.map((message) => {
+    if (!message.content.some(isMediaPart)) return message;
+    changed = true;
+    return {
+      ...message,
+      content: message.content.map((part): ContentPart =>
+        isMediaPart(part) ? { type: 'text', text: MEDIA_PART_MARKERS[part.type] } : part,
+      ),
+    };
+  });
+  return changed ? out : messages;
+}
 
 function shrinkCompactionHistoryAfterOverflow<T extends Message>(
   messages: readonly T[],

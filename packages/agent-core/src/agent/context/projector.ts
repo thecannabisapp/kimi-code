@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 import type { ContentPart, Message, TextPart } from '@moonshot-ai/kosong';
 
 import { ErrorCodes, KimiError } from '../../errors';
@@ -464,4 +466,169 @@ export function trimTrailingOpenToolExchange(history: readonly Message[]): Messa
   );
   const closed = assistant.toolCalls.every((toolCall) => trailingToolCallIds.has(toolCall.id));
   return closed ? [...history] : history.slice(0, lastNonToolIndex);
+}
+
+/**
+ * How many of the most recent media parts survive the media-degraded
+ * projection. The tail images are what the model is actively working from
+ * (the screenshot it just took); everything older is replaced by a marker.
+ */
+export const MEDIA_DEGRADE_KEEP_RECENT = 2;
+
+const MEDIA_DEGRADED_PLACEHOLDERS = {
+  image_url:
+    '[image omitted: dropped to fit the provider request size limit; re-read the file to view it]',
+  audio_url:
+    '[audio omitted: dropped to fit the provider request size limit; re-read the file to hear it]',
+  video_url:
+    '[video omitted: dropped to fit the provider request size limit; re-read the file to view it]',
+} as const;
+
+/**
+ * Provider-compatible markers for a resend with every media part stripped.
+ * This projection recovers from both an image-format rejection and a request
+ * that remains too large after retaining recent media, so the wording must
+ * not diagnose either cause. Re-reading the path gives the model the relevant
+ * conversion or size-reduction guidance at the tool boundary.
+ */
+export const MEDIA_STRIPPED_PLACEHOLDERS = {
+  image_url:
+    '[image omitted for provider compatibility; re-read the file to view it or get conversion guidance]',
+  audio_url:
+    '[audio omitted for provider compatibility; re-read the file to hear it]',
+  video_url:
+    '[video omitted for provider compatibility; re-read the file to view it]',
+} as const;
+
+type MediaPlaceholderSet = typeof MEDIA_DEGRADED_PLACEHOLDERS | typeof MEDIA_STRIPPED_PLACEHOLDERS;
+
+type DegradableMediaPart = Extract<
+  ContentPart,
+  { readonly type: keyof MediaPlaceholderSet }
+>;
+
+interface MediaContainer {
+  readonly url: string;
+  readonly id?: string;
+}
+
+/**
+ * Content identities of the media present when full stripping first becomes
+ * necessary in a turn. Digests, rather than part/container object identity,
+ * survive compaction and ensure re-reading identical media remains stripped.
+ */
+export type MediaStripSnapshot = ReadonlySet<string>;
+
+/**
+ * Projection shallow-clones content parts but keeps their nested media
+ * containers. Cache each container's digest so sticky stripped projections do
+ * not rescan giant base64 data URLs on every step. A clone produced by
+ * compaction misses the cache but recomputes the same content digest.
+ */
+const MEDIA_CONTAINER_KEY_CACHE = new WeakMap<
+  MediaContainer,
+  Partial<Record<DegradableMediaPart['type'], string>>
+>();
+
+function isDegradableMediaPart(
+  part: ContentPart,
+): part is DegradableMediaPart {
+  return part.type in MEDIA_DEGRADED_PLACEHOLDERS;
+}
+
+function mediaContainer(part: DegradableMediaPart): MediaContainer {
+  if (part.type === 'image_url') return part.imageUrl;
+  if (part.type === 'audio_url') return part.audioUrl;
+  return part.videoUrl;
+}
+
+function mediaStripKey(part: DegradableMediaPart): string {
+  const container = mediaContainer(part);
+  const keysByType = MEDIA_CONTAINER_KEY_CACHE.get(container);
+  const cached = keysByType?.[part.type];
+  if (cached !== undefined) return cached;
+
+  const key = createHash('sha256')
+    .update(part.type)
+    .update('\0')
+    .update(container.id ?? '')
+    .update('\0')
+    .update(container.url)
+    .digest('hex');
+  if (keysByType === undefined) {
+    MEDIA_CONTAINER_KEY_CACHE.set(container, { [part.type]: key });
+  } else {
+    keysByType[part.type] = key;
+  }
+  return key;
+}
+
+/** Capture the provider-visible content identity of every current media part. */
+export function captureMediaStripSnapshot(messages: readonly Message[]): MediaStripSnapshot {
+  const snapshot = new Set<string>();
+  for (const message of messages) {
+    for (const part of message.content) {
+      if (isDegradableMediaPart(part)) snapshot.add(mediaStripKey(part));
+    }
+  }
+  return snapshot;
+}
+
+/**
+ * Replace only media captured in `snapshot`. Media produced later with a new
+ * provider-visible identity survives, allowing the model to read a smaller
+ * recovery copy while the oversized/poisoned content stays stripped.
+ */
+export function stripMediaPartsBySnapshot(
+  messages: readonly Message[],
+  snapshot: MediaStripSnapshot,
+): Message[] {
+  let changed = false;
+  const result = messages.map((message) => {
+    let messageChanged = false;
+    const content = message.content.map((part): ContentPart => {
+      if (!isDegradableMediaPart(part) || !snapshot.has(mediaStripKey(part))) return part;
+      changed = true;
+      messageChanged = true;
+      return { type: 'text', text: MEDIA_STRIPPED_PLACEHOLDERS[part.type] };
+    });
+    return messageChanged ? { ...message, content } : message;
+  });
+  return changed ? result : (messages as Message[]);
+}
+
+/**
+ * Replace all but the `keepRecent` most recent media parts with deterministic
+ * text markers. This is the media-degraded projection used to resend a request
+ * the provider rejected as too large (HTTP 413 on accumulated base64 media)
+ * and — with `keepRecent = 0` and `MEDIA_STRIPPED_PLACEHOLDERS` — the resend
+ * after a provider media rejection, where only a full strip guarantees a
+ * compatible request. A purely read-side
+ * transform — the underlying history is left untouched — that trades pixels
+ * for deliverability while the surrounding text (including ReadMediaFile's
+ * `<image path="...">` wrapper) survives, so the model can re-read any file
+ * it still needs. Untouched messages are returned by reference, and when
+ * nothing needs degrading the input array itself is returned.
+ */
+export function degradeOlderMediaParts(
+  messages: readonly Message[],
+  keepRecent: number,
+  placeholders: MediaPlaceholderSet = MEDIA_DEGRADED_PLACEHOLDERS,
+): Message[] {
+  const mediaCount = messages.reduce(
+    (count, message) => count + message.content.filter(isDegradableMediaPart).length,
+    0,
+  );
+  let toDegrade = Math.max(0, mediaCount - keepRecent);
+  if (toDegrade === 0) return messages as Message[];
+
+  return messages.map((message) => {
+    if (toDegrade === 0 || !message.content.some(isDegradableMediaPart)) return message;
+    const content = message.content.map((part): ContentPart => {
+      if (toDegrade === 0 || !isDegradableMediaPart(part)) return part;
+      toDegrade -= 1;
+      return { type: 'text', text: placeholders[part.type] };
+    });
+    return { ...message, content };
+  });
 }

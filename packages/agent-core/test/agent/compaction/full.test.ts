@@ -5,6 +5,7 @@ import { join } from 'pathe';
 import {
   APIConnectionError,
   APIContextOverflowError,
+  APIRequestTooLargeError,
   APIStatusError,
   generate as runKosongGenerate,
   UNKNOWN_CAPABILITY,
@@ -133,6 +134,53 @@ describe('FullCompaction', () => {
       }),
     });
     await ctx.expectResumeMatches();
+  });
+
+  it('attaches the summarizer request trace id to compaction_finished', async () => {
+    const records: TelemetryRecord[] = [];
+    const ctx = testAgent({ telemetry: recordingTelemetry(records) });
+    ctx.configure({
+      provider: CATALOGUED_PROVIDER,
+      modelCapabilities: CATALOGUED_MODEL_CAPABILITIES,
+    });
+    ctx.appendExchange(1, 'old user one', 'old assistant one', 20);
+
+    ctx.mockNextProviderResponse({
+      parts: [{ type: 'text', text: 'Compacted summary.' }],
+      traceId: 'trace-compact-1',
+    });
+    await ctx.rpc.beginCompaction({});
+    await ctx.once('compaction.completed');
+
+    expect(records).toContainEqual({
+      event: 'compaction_finished',
+      properties: expect.objectContaining({ source: 'manual', trace_id: 'trace-compact-1' }),
+    });
+    expect(ctx.agent.fullCompaction.lastTraceId).toBe('trace-compact-1');
+  });
+
+  it('attaches the failed summarizer request trace id to compaction_failed', async () => {
+    const records: TelemetryRecord[] = [];
+    const generate: GenerateFn = async () => {
+      // 401 is not retryable: the round fails on the first attempt without
+      // backoff timers.
+      throw new APIStatusError(401, 'Unauthorized', 'req-1', null, 'trace-compact-err');
+    };
+    const ctx = testAgent({ generate, telemetry: recordingTelemetry(records) });
+    ctx.configure({
+      provider: CATALOGUED_PROVIDER,
+      modelCapabilities: CATALOGUED_MODEL_CAPABILITIES,
+    });
+    ctx.appendExchange(1, 'old user one', 'old assistant one', 20);
+    const failed = ctx.once('error');
+
+    await ctx.rpc.beginCompaction({});
+    await failed;
+
+    expect(records).toContainEqual({
+      event: 'compaction_failed',
+      properties: expect.objectContaining({ source: 'manual', trace_id: 'trace-compact-err' }),
+    });
   });
 
   it('emits the raw summary while keeping the prefixed summary in model context', async () => {
@@ -363,6 +411,7 @@ describe('FullCompaction', () => {
   });
 
   it('force-refreshes OAuth credentials on compaction 401 and treats replay 401 as provider auth error', async () => {
+    const records: TelemetryRecord[] = [];
     const tokenCalls: Array<boolean | undefined> = [];
     const authKeys: string[] = [];
     const oauthOptions = oauthTestAgentOptions(async (options) => {
@@ -379,11 +428,17 @@ describe('FullCompaction', () => {
     ) => {
       authKeys.push(options?.auth?.apiKey ?? '<missing>');
       if (authKeys.length <= 2) {
-        throw new APIStatusError(401, 'Unauthorized', 'req-compact-401');
+        throw new APIStatusError(
+          401,
+          'Unauthorized',
+          'req-compact-401',
+          null,
+          authKeys.length === 1 ? 'trace-compact-initial-401' : 'trace-compact-replay-401',
+        );
       }
       return textResult('Recovered compacted summary.');
     };
-    const ctx = testAgent({ ...oauthOptions, generate });
+    const ctx = testAgent({ ...oauthOptions, generate, telemetry: recordingTelemetry(records) });
     ctx.configure();
     await ctx.rpc.setModel({ model: 'kimi-code' });
     ctx.newEvents();
@@ -408,6 +463,9 @@ describe('FullCompaction', () => {
     );
     expect(authKeys).toEqual(['fresh-token', 'forced-refresh-token']);
     expect(tokenCalls).toEqual([undefined, true]);
+    expect(
+      records.find((record) => record.event === 'compaction_failed')?.properties?.['trace_id'],
+    ).toBe('trace-compact-replay-401');
     expect(ctx.compactHistory()).toEqual([
       { role: 'user', text: 'old user one' },
       { role: 'assistant', text: 'old assistant one' },
@@ -557,6 +615,142 @@ describe('FullCompaction', () => {
         retry_count: 1,
       }),
     });
+    await ctx.expectResumeMatches();
+  });
+
+  it('strips media to text markers and retries when the summarizer request is rejected as too large', async () => {
+    let attempts = 0;
+    const histories: Message[][] = [];
+    const generate: GenerateFn = async (_provider, _system, _tools, history) => {
+      attempts += 1;
+      histories.push(structuredClone(history));
+      if (attempts === 1) {
+        throw new APIRequestTooLargeError(413, 'Request exceeds the maximum size', 'req-413');
+      }
+      return textResult('Compacted without media.');
+    };
+    const ctx = testAgent({ generate });
+    ctx.configure({
+      provider: CATALOGUED_PROVIDER,
+      modelCapabilities: CATALOGUED_MODEL_CAPABILITIES,
+    });
+    // A ReadMediaFile-shaped result: path wrapper text around inline image data.
+    ctx.agent.context.appendUserMessage(
+      [
+        { type: 'text', text: '<image path="/workspace/shot.png">' },
+        { type: 'image_url', imageUrl: { url: 'data:image/png;base64,AAAA' } },
+        { type: 'text', text: '</image>' },
+      ],
+      { kind: 'user' },
+    );
+    ctx.agent.context.appendUserMessage(
+      [
+        { type: 'video_url', videoUrl: { url: 'data:video/mp4;base64,BBBB' } },
+        { type: 'audio_url', audioUrl: { url: 'data:audio/mp3;base64,CCCC' } },
+      ],
+      { kind: 'user' },
+    );
+    const compacted = ctx.once('context.apply_compaction');
+    const completed = ctx.once('compaction.completed');
+
+    await ctx.rpc.beginCompaction({});
+    await compacted;
+    await completed;
+
+    expect(attempts).toBe(2);
+    // The first attempt goes out with the media as-is.
+    const firstParts = histories[0]!.flatMap((message) => message.content);
+    expect(firstParts.some((part) => part.type === 'image_url')).toBe(true);
+    // The 413 retry replaces every media part with a text marker; the
+    // ReadMediaFile path wrapper survives so the summary can still reference
+    // the file, and no base64 payload leaks into the retried request.
+    // (Projection may merge adjacent text parts, so assert on the joined text.)
+    const retryParts = histories[1]!.flatMap((message) => message.content);
+    expect(retryParts.some((part) => part.type !== 'text' && part.type !== 'think')).toBe(false);
+    const retryText = retryParts
+      .filter((part) => part.type === 'text')
+      .map((part) => part.text)
+      .join('\n');
+    expect(retryText).toContain('[image]');
+    expect(retryText).toContain('[video]');
+    expect(retryText).toContain('[audio]');
+    expect(retryText).toContain('<image path="/workspace/shot.png">');
+    expect(JSON.stringify(histories[1])).not.toContain('base64');
+    // Stripping is not an overflow shrink: the retry drops no messages.
+    expect(histories[1]!.length).toBe(histories[0]!.length);
+    // The real history is untouched: recent kept user messages retain media.
+    const keptParts = ctx.agent.context.history.flatMap((message) => message.content);
+    expect(keptParts.some((part) => part.type === 'image_url')).toBe(true);
+    await ctx.expectResumeMatches();
+  });
+
+  it('shrinks the history when the summarizer request stays too large after media stripping', async () => {
+    let attempts = 0;
+    const histories: Message[][] = [];
+    const generate: GenerateFn = async (_provider, _system, _tools, history) => {
+      attempts += 1;
+      histories.push(structuredClone(history));
+      if (attempts <= 2) {
+        throw new APIRequestTooLargeError(413, 'Request exceeds the maximum size');
+      }
+      return textResult('Recovered after shrink.');
+    };
+    const ctx = testAgent({ generate });
+    ctx.configure({
+      provider: CATALOGUED_PROVIDER,
+      modelCapabilities: CATALOGUED_MODEL_CAPABILITIES,
+    });
+    ctx.appendExchange(1, 'old user one', 'old assistant one', 20);
+    ctx.appendExchange(2, 'old user two', 'old assistant two', 40);
+    ctx.appendExchange(3, 'recent user three', 'recent assistant three', 120);
+    ctx.agent.context.appendUserMessage(
+      [{ type: 'image_url', imageUrl: { url: 'data:image/png;base64,AAAA' } }],
+      { kind: 'user' },
+    );
+    const completed = ctx.once('compaction.completed');
+
+    await ctx.rpc.beginCompaction({});
+    await completed;
+
+    expect(attempts).toBe(3);
+    // Attempt 2 is the media strip: same message count, no media parts.
+    expect(histories[1]!.length).toBe(histories[0]!.length);
+    expect(
+      histories[1]!.flatMap((m) => m.content).some((part) => part.type === 'image_url'),
+    ).toBe(false);
+    // Attempt 3 falls through to the overflow shrink and drops old messages.
+    expect(histories[2]!.length).toBeLessThan(histories[1]!.length);
+    await ctx.expectResumeMatches();
+  });
+
+  it('shrinks immediately on a too-large rejection when the history has no media', async () => {
+    let attempts = 0;
+    const histories: Message[][] = [];
+    const generate: GenerateFn = async (_provider, _system, _tools, history) => {
+      attempts += 1;
+      histories.push(structuredClone(history));
+      if (attempts === 1) {
+        throw new APIRequestTooLargeError(413, 'Request exceeds the maximum size');
+      }
+      return textResult('Recovered after shrink.');
+    };
+    const ctx = testAgent({ generate });
+    ctx.configure({
+      provider: CATALOGUED_PROVIDER,
+      modelCapabilities: CATALOGUED_MODEL_CAPABILITIES,
+    });
+    ctx.appendExchange(1, 'old user one', 'old assistant one', 20);
+    ctx.appendExchange(2, 'old user two', 'old assistant two', 40);
+    ctx.appendExchange(3, 'recent user three', 'recent assistant three', 120);
+    const completed = ctx.once('compaction.completed');
+
+    await ctx.rpc.beginCompaction({});
+    await completed;
+
+    // With no media to strip, the too-large rejection goes straight to the
+    // overflow shrink instead of wasting a retry on an identical request.
+    expect(attempts).toBe(2);
+    expect(histories[1]!.length).toBeLessThan(histories[0]!.length);
     await ctx.expectResumeMatches();
   });
 
@@ -1884,16 +2078,14 @@ describe('FullCompaction', () => {
     await ctx.untilTurnEnd();
 
     expect(callCount).toBe(3);
-    // The catalogued model declares no supportEfforts, so the kimi provider
-    // normalizes to boolean thinking and reports 'on' rather than the
-    // requested 'high'. The agent's stored thinkingEffort ('high') is still
-    // carried across the compaction (see the record assertion below).
+    // A Kimi model without supportEfforts is boolean-only, so the effective
+    // state and every compaction request use 'on'.
     expect(providerThinkingEfforts).toEqual(['on', 'on', 'on']);
     expect(records).toContainEqual({
       event: 'compaction_finished',
       properties: expect.objectContaining({
         source: 'auto',
-        thinking_effort: 'high',
+        thinking_effort: 'on',
       }),
     });
   });

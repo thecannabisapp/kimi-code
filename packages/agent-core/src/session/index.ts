@@ -17,6 +17,8 @@ import {
   appendWorkspaceAdditionalDir,
   normalizeAdditionalDirs,
   parseBooleanEnv,
+  PRINT_MAX_TURNS_DEFAULT,
+  PRINT_WAIT_CEILING_S_DEFAULT,
   readWorkspaceAdditionalDirs,
   resolveWorkspaceAdditionalDirs,
   resolveConfigValue,
@@ -52,6 +54,7 @@ import { SessionSubagentHost } from './subagent-host';
 import { sessionMediaOriginalsDir } from '../tools/support/image-originals';
 import type { ToolServices } from '../tools/support/services';
 import { FlagResolver, type ExperimentalFlagResolver } from '../flags';
+import { ImageLimits } from '../tools/support/image-limits';
 import { abortError } from '../utils/abort';
 
 export interface SessionOptions {
@@ -75,6 +78,8 @@ export interface SessionOptions {
   readonly pluginCommands?: readonly PluginCommandDef[];
   readonly appVersion?: string;
   readonly experimentalFlags?: ExperimentalFlagResolver;
+  /** Owner-scoped [image] limits, threaded from the owning core into every agent. */
+  readonly imageLimits?: ImageLimits;
   readonly profiles?: Record<string, ResolvedAgentProfile>;
   readonly initPrompt?: string;
   readonly additionalDirs?: readonly string[];
@@ -98,9 +103,9 @@ export interface SessionSkillConfig {
 }
 
 export interface AgentMeta {
-  readonly homedir: string;
+  readonly homedir?: string;
   readonly type: AgentType;
-  readonly parentAgentId: string | null;
+  readonly parentAgentId?: string | null;
   readonly swarmItem?: string;
 }
 
@@ -129,6 +134,10 @@ export interface SessionMeta {
    *  session directory is self-describing and the global session index does not
    *  have to be trusted for the (one-way-hashed) workDir. */
   workDir?: string;
+  /** Directories added for this session only. Unlike workspace local config,
+   *  these follow the session across close/resume without affecting any other
+   *  session opened in the same workspace. */
+  additionalDirs?: string[];
   agents: Record<string, AgentMeta>;
   custom: Record<string, any>;
 }
@@ -171,9 +180,11 @@ export class Session {
   private readonly logHandle: SessionLogHandle | undefined;
   readonly hookEngine: HookEngine;
   readonly experimentalFlags: ExperimentalFlagResolver;
+  readonly imageLimits: ImageLimits;
   private toolKaos: Kaos;
   private persistenceKaos: Kaos;
   private additionalDirs: readonly string[];
+  private sessionAdditionalDirs: readonly string[] = [];
   private readonly pluginCommands: readonly PluginCommandDef[];
   private agentIdCounter = 0;
   private readonly skillsReady: Promise<void>;
@@ -187,6 +198,8 @@ export class Session {
   };
   private writeMetadataPromise = Promise.resolve();
   private agentsMdWarning: string | undefined;
+  private printSteerDeadline: number | undefined;
+  private printSteerTurns = 0;
 
   constructor(public readonly options: SessionOptions) {
     // Attach the per-session log sink up front so the constructor's
@@ -204,6 +217,7 @@ export class Session {
       (options.id === undefined ? log : log.createChild({ sessionId: options.id }));
     this.rpc = options.rpc;
     this.experimentalFlags = options.experimentalFlags ?? new FlagResolver();
+    this.imageLimits = options.imageLimits ?? new ImageLimits();
     this.hookEngine = new HookEngine(options.hooks, {
       cwd: options.kaos.getcwd(),
       sessionId: options.id,
@@ -256,6 +270,10 @@ export class Session {
     }
   }
 
+  async setBaseAdditionalDirs(additionalDirs: readonly string[]): Promise<void> {
+    await this.setAdditionalDirs([...additionalDirs, ...this.sessionAdditionalDirs]);
+  }
+
   async addAdditionalDir(
     path: string,
     persist = true,
@@ -273,6 +291,22 @@ export class Session {
     const workspace = await readWorkspaceAdditionalDirs(systemKaos, cwd);
     const additionalDirs = await resolveWorkspaceAdditionalDirs(systemKaos, cwd, [path]);
     const nextAdditionalDirs = normalizeAdditionalDirs([...this.additionalDirs, ...additionalDirs]);
+    const nextSessionAdditionalDirs = normalizeAdditionalDirs([
+      ...this.sessionAdditionalDirs,
+      ...additionalDirs,
+    ]);
+    const previousMetadata = this.metadata;
+    this.metadata = {
+      ...this.metadata,
+      additionalDirs: nextSessionAdditionalDirs,
+    };
+    try {
+      await this.writeMetadata();
+    } catch (error) {
+      this.metadata = previousMetadata;
+      throw error;
+    }
+    this.sessionAdditionalDirs = nextSessionAdditionalDirs;
     await this.setAdditionalDirs(nextAdditionalDirs);
     this.notifyAdditionalDirAdded(path, false, workspace.configPath);
     return {
@@ -316,7 +350,14 @@ export class Session {
   async resume(): Promise<{ warning?: string }> {
     await this.skillsReady;
     this.log.info('session resume', { app_version: this.options.appVersion });
-    const { agents } = await this.readMetadata();
+    const { agents, additionalDirs = [] } = await this.readMetadata();
+    const cwd = this.toolKaos.getcwd();
+    this.sessionAdditionalDirs = await resolveWorkspaceAdditionalDirs(
+      this.systemContextKaos(cwd),
+      cwd,
+      additionalDirs,
+    );
+    await this.setBaseAdditionalDirs(this.additionalDirs);
     this.agents.clear();
     // Only the main agent is needed to reopen the session; subagents replay
     // lazily when an RPC or Agent(resume=...) call asks for their state.
@@ -444,26 +485,21 @@ export class Session {
    * Wait for all still-running background tasks (across every agent) to reach a
    * terminal state before a `kimi -p` (print) run exits.
    *
-   * Gated by `background.keep_alive_on_exit`: when it is not `true`, this returns
-   * immediately so print mode keeps its default single-turn semantics. The wait is
-   * bounded by `background.print_wait_ceiling_s` (default 3600s) so a wedged task
-   * cannot keep the process alive forever.
+   * Only runs when the resolved print background mode is `'drain'` (see
+   * `resolvePrintBackgroundMode`): `print_background_mode = "drain"`, or the
+   * legacy `keep_alive_on_exit = true` fallback. In every other mode it returns
+   * immediately. The wait is bounded by `background.print_wait_ceiling_s`
+   * (default `PRINT_WAIT_CEILING_S_DEFAULT`, effectively unbounded) so a wedged
+   * task can still be given up on eventually.
    *
    * Terminal notifications are suppressed for each task while we wait, so a task
    * completing cannot `turn.steer` the (already finished) main agent into launching
-   * a new turn.
+   * a new turn. (This is exactly what `'steer'` mode avoids by never calling here.)
    */
   async waitForBackgroundTasksOnPrint(): Promise<void> {
-    const keepAliveOnExit = resolveConfigValue({
-      env: process.env,
-      envKey: BACKGROUND_KEEP_ALIVE_ON_EXIT_ENV,
-      configValue: this.options.background?.keepAliveOnExit,
-      defaultValue: false,
-      parseEnv: parseBooleanEnv,
-    });
-    if (!keepAliveOnExit) return;
+    if (this.resolvePrintBackgroundMode() !== 'drain') return;
 
-    const ceilingS = this.options.background?.printWaitCeilingS ?? 3600;
+    const ceilingS = this.options.background?.printWaitCeilingS ?? PRINT_WAIT_CEILING_S_DEFAULT;
     const timeoutMs = ceilingS * 1000;
     const deadline = Date.now() + timeoutMs;
 
@@ -513,6 +549,79 @@ export class Session {
         timeoutMs,
       });
     }
+  }
+
+  /**
+   * Resolve the effective print-mode (`kimi -p`) background-task policy.
+   *
+   * `background.print_background_mode` is authoritative when set. Otherwise we
+   * fall back to the legacy `background.keep_alive_on_exit` mapping so existing
+   * configs keep their behavior: `keep_alive_on_exit = true` ⇒ `'drain'`
+   * (suppress + drain background tasks before exit). When neither is set the
+   * mode defaults to `'steer'`: a headless run stays alive while background
+   * tasks are pending so their completions can steer new main turns.
+   */
+  private resolvePrintBackgroundMode(): 'exit' | 'drain' | 'steer' {
+    const configured = this.options.background?.printBackgroundMode;
+    if (configured !== undefined) return configured;
+    const keepAliveOnExit = resolveConfigValue({
+      env: process.env,
+      envKey: BACKGROUND_KEEP_ALIVE_ON_EXIT_ENV,
+      configValue: this.options.background?.keepAliveOnExit,
+      defaultValue: false,
+      parseEnv: parseBooleanEnv,
+    });
+    return keepAliveOnExit ? 'drain' : 'steer';
+  }
+
+  private countActiveBackgroundTasks(): number {
+    let count = 0;
+    for (const agent of this.readyAgents()) {
+      count += agent.background.list(true).length;
+    }
+    return count;
+  }
+
+  /**
+   * Decide what the `kimi -p` driver should do after the main agent's turn ends
+   * with `reason === 'completed'`. Returns `'finish'` when the run may exit, or
+   * `'continue'` when the driver must stay alive so a background-task completion
+   * can `turn.steer` the main agent into a new turn.
+   *
+   *  - 'exit'  : finish immediately.
+   *  - 'drain' : suppress + drain background tasks, then finish (legacy
+   *              `keep_alive_on_exit = true` behavior).
+   *  - 'steer' : while background tasks are still pending, return 'continue' so
+   *              completions steer new main turns; finish once quiescent, or when
+   *              the wall-clock ceiling (`print_wait_ceiling_s`) or the turn cap
+   *              (`print_max_turns`) is reached. This is the default mode.
+   */
+  async handlePrintMainTurnCompleted(): Promise<'finish' | 'continue'> {
+    const mode = this.resolvePrintBackgroundMode();
+    if (mode === 'exit') return 'finish';
+    if (mode === 'drain') {
+      await this.waitForBackgroundTasksOnPrint();
+      return 'finish';
+    }
+
+    // 'steer'
+    const ceilingS = this.options.background?.printWaitCeilingS ?? PRINT_WAIT_CEILING_S_DEFAULT;
+    const maxTurns = this.options.background?.printMaxTurns ?? PRINT_MAX_TURNS_DEFAULT;
+    const now = Date.now();
+    this.printSteerDeadline ??= now + ceilingS * 1000;
+    this.printSteerTurns += 1;
+    if (now >= this.printSteerDeadline) {
+      this.log.warn('print steer ceiling reached, finishing', { ceilingS });
+      return 'finish';
+    }
+    if (this.printSteerTurns > maxTurns) {
+      this.log.warn('print steer max turns reached, finishing', { maxTurns });
+      return 'finish';
+    }
+    if (this.countActiveBackgroundTasks() > 0) {
+      return 'continue';
+    }
+    return 'finish';
   }
 
   async createAgent(
@@ -841,6 +950,7 @@ export class Session {
       pluginSessionStarts: type === 'main' ? this.options.pluginSessionStarts : undefined,
       pluginCommands: type === 'main' ? this.options.pluginCommands : undefined,
       experimentalFlags: this.experimentalFlags,
+      imageLimits: this.imageLimits,
       additionalDirs: parentAgent?.getAdditionalDirs() ?? this.additionalDirs,
       systemPromptContextProvider: () =>
         prepareSystemPromptContext(
@@ -920,7 +1030,13 @@ export class Session {
         : await this.resumeAgent(parentAgentId, [...stack, id]);
 
     try {
-      const agent = this.instantiateAgent(id, meta.homedir, meta.type, {}, parentAgentId);
+      const agent = this.instantiateAgent(
+        id,
+        join(this.options.homedir, 'agents', id),
+        meta.type,
+        {},
+        parentAgentId,
+      );
       const result = await agent.resume();
       this.restoreAgentProfileHandle(agent, meta, parent?.agent);
       this.agents.set(id, agent);
