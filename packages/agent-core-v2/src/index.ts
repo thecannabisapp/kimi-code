@@ -112,6 +112,7 @@ export * from '#/app/modelCatalog/modelCatalog';
 export * from '#/app/modelCatalog/modelCatalogService';
 export * from '#/app/agentProfileCatalog/agentProfileCatalog';
 export * from '#/app/agentProfileCatalog/agentProfileCatalogService';
+export * from '#/app/agentProfileCatalog/customDirLoader';
 export * from '#/app/agentProfileCatalog/profile-shared';
 export * from '#/app/agentProfileCatalog/promptPrefix';
 export {

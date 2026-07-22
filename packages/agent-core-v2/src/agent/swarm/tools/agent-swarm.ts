@@ -45,6 +45,12 @@ export const AgentSwarmToolInputSchema = z
       .describe(
         'Subagent type used for every new subagent spawned from items; defaults to coder when omitted. Resumed subagents always keep their original type, so passing subagent_type together with resume_agent_ids is allowed — it only affects the item-based spawns.',
       ),
+    thinking_level: z
+      .enum(['off', 'low', 'medium', 'high', 'xhigh', 'max'])
+      .optional()
+      .describe(
+        'Optional thinking effort level for all subagents spawned in this swarm ("off", "low", "medium", "high", "xhigh", "max").',
+      ),
     prompt_template: z
       .string()
       .trim()

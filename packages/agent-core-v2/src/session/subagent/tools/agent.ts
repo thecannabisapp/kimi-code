@@ -93,6 +93,12 @@ export const AgentToolInputSchema = z.preprocess(
       .describe(
         'One of the available agent types (see "Available agent types" in this tool description). Defaults to "coder" when omitted.',
       ),
+    thinking_level: z
+      .enum(['off', 'low', 'medium', 'high', 'xhigh', 'max'])
+      .optional()
+      .describe(
+        'Optional per-call thinking effort level for this subagent turn ("off", "low", "medium", "high", "xhigh", "max"). Overrides the parent session default.',
+      ),
     resume: z
       .string()
       .optional()
@@ -249,11 +255,13 @@ export class AgentTool implements BuiltinTool<AgentToolInput> {
       if (own.modelAlias === undefined) {
         throw new Error('Caller agent has no model bound');
       }
+      const resolvedThinkingLevel =
+        args.thinking_level ?? profile.thinkingLevel ?? own.thinkingLevel;
       const created = await this.lifecycle.create({
         binding: {
           profile: profile.name,
           model: own.modelAlias,
-          thinking: own.thinkingLevel,
+          thinking: resolvedThinkingLevel,
           cwd: own.cwd,
         },
         labels: subagentLabels(this.callerAgentId),

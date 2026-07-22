@@ -20,6 +20,7 @@ export const RawAgentProfileSchema = z.object({
   // (`mcp__*`, `mcp__github__*`) that gate which MCP tools the profile sees.
   tools: z.array(z.string()).optional(),
   whenToUse: z.string().optional(),
+  thinking_level: z.string().optional(),
   subagents: z.record(z.string(), RawSubagentProfileSchema).optional(),
 });
 
@@ -52,5 +53,6 @@ export interface ResolvedAgentProfile {
   systemPrompt: SystemPromptRenderer;
   tools: string[];
   whenToUse?: string;
+  thinkingLevel?: string;
   subagents?: Record<string, ResolvedAgentProfile>;
 }

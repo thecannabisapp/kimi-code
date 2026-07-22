@@ -66,6 +66,12 @@ export const AgentToolInputSchema = z.preprocess(
       .describe(
         'One of the available agent types (see "Available agent types" in this tool description). Defaults to "coder" when omitted.',
       ),
+    thinking_level: z
+      .enum(['off', 'low', 'medium', 'high', 'xhigh', 'max'])
+      .optional()
+      .describe(
+        'Optional per-call thinking effort level for this subagent turn ("off", "low", "medium", "high", "xhigh", "max"). Overrides parent session default.',
+      ),
     resume: z
       .string()
       .optional()
