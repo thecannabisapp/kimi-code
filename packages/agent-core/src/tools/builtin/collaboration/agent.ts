@@ -208,6 +208,7 @@ export class AgentTool implements BuiltinTool<AgentToolInput> {
         parentToolCallId: toolCallId,
         prompt: args.prompt,
         description: args.description,
+        thinkingLevel: args.thinking_level,
         runInBackground,
         signal: controller.signal,
       };

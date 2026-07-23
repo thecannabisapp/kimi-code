@@ -370,6 +370,49 @@ describe('SessionSubagentHost', () => {
     ]);
   });
 
+  it('respects profile thinkingLevel and explicit option thinkingLevel over parent thinkingEffort', async () => {
+    const parent = testAgent();
+    parent.configure({ thinkingEffort: 'high' });
+    const child = testAgent({
+      type: 'sub',
+      permission: { parent: parent.agent.permission },
+    });
+    child.mockNextResponse({
+      type: 'text',
+      text: 'Completed task with low thinking effort override.'.repeat(5),
+    });
+    const customProfiles: Record<string, ResolvedAgentProfile> = {
+      agent: {
+        name: 'agent',
+        subagents: {
+          explore: {
+            name: 'explore',
+            thinkingLevel: 'low',
+            tools: ['Read'],
+            systemPrompt: () => 'explore prompt',
+          },
+        },
+        tools: [],
+        systemPrompt: () => 'agent prompt',
+      },
+    };
+    const session = fakeSession(parent.agent, child.agent);
+    session.options.profiles = customProfiles;
+    const host = new SessionSubagentHost(session, 'main');
+
+    await host.spawn({
+      profileName: 'explore',
+      parentToolCallId: 'call_agent',
+      prompt: 'Search files',
+      description: 'Search',
+      thinkingLevel: 'off',
+      runInBackground: false,
+      signal,
+    });
+
+    expect(child.agent.config.data().thinkingEffort).toBe('off');
+  });
+
   it('inherits active parent user tools when spawning a subagent', async () => {
     const parent = testAgent();
     parent.configure();

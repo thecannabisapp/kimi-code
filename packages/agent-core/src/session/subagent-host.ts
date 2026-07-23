@@ -112,6 +112,7 @@ export interface RunSubagentOptions {
   readonly parentToolCallUuid?: string;
   readonly prompt: string;
   readonly description: string;
+  readonly thinkingLevel?: string;
   readonly swarmIndex?: number;
   readonly runInBackground: boolean;
   readonly signal: AbortSignal;
@@ -164,7 +165,7 @@ export class SessionSubagentHost {
     const completion = this.runWithActiveChild(id, options, async (runOptions) => {
       this.emitSubagentSpawned(parent, id, profile.name, runOptions);
       try {
-        await this.configureChild(parent, agent, profile);
+        await this.configureChild(parent, agent, profile, runOptions);
         return await this.runPromptTurn(parent, id, agent, profile.name, runOptions);
       } catch (error) {
         this.emitSubagentFailed(parent, id, runOptions, error);
@@ -187,7 +188,8 @@ export class SessionSubagentHost {
     const completion = this.runWithActiveChild(agentId, options, async (runOptions) => {
       this.emitSubagentSpawned(parent, agentId, profileName, runOptions);
       try {
-        child.config.update({ modelAlias: parent.config.modelAlias });
+        const resolvedThinking = runOptions.thinkingLevel ?? child.config.thinkingEffort;
+        child.config.update({ modelAlias: parent.config.modelAlias, thinkingEffort: resolvedThinking });
         return await this.runPromptTurn(parent, agentId, child, profileName, runOptions);
       } catch (error) {
         this.emitSubagentFailed(parent, agentId, runOptions, error);
@@ -429,12 +431,13 @@ export class SessionSubagentHost {
     parent: Agent,
     child: Agent,
     profile: ResolvedAgentProfile,
+    options?: RunSubagentOptions,
   ): Promise<void> {
-    // A subagent always inherits the parent agent's model.
+    const resolvedThinking = options?.thinkingLevel ?? profile.thinkingLevel ?? parent.config.thinkingEffort;
     child.config.update({
       cwd: parent.config.cwd,
       modelAlias: parent.config.modelAlias,
-      thinkingEffort: parent.config.thinkingEffort,
+      thinkingEffort: resolvedThinking,
     });
 
     const context = await prepareSystemPromptContext(

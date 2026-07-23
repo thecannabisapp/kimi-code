@@ -52,6 +52,12 @@ export const AgentSwarmToolInputSchema = z
       .describe(
         'Map of existing subagent agent_id to the prompt used to resume that subagent. These resumed subagents are launched before new item-based subagents.',
       ),
+    thinking_level: z
+      .enum(['off', 'low', 'medium', 'high', 'xhigh', 'max'])
+      .optional()
+      .describe(
+        'Optional thinking effort level for all subagents spawned in this swarm ("off", "low", "medium", "high", "xhigh", "max").',
+      ),
   })
   .strict();
 
@@ -144,6 +150,7 @@ export class AgentSwarmTool implements BuiltinTool<AgentSwarmToolInput> {
         parentToolCallId: toolCallId,
         prompt: spec.prompt,
         description: childDescription(args.description, spec.index, descriptionName),
+        thinkingLevel: args.thinking_level,
         swarmIndex: spec.index,
         runInBackground: false,
         swarmItem: spec.item,
