@@ -99,6 +99,14 @@ export const AgentToolInputSchema = z.preprocess(
       .describe(
         'Optional per-call thinking effort level for this subagent turn ("off", "low", "medium", "high", "xhigh", "max"). Overrides the parent session default.',
       ),
+    model: z
+      .string()
+      .trim()
+      .min(1)
+      .optional()
+      .describe(
+        'Optional model name or alias to use for this subagent (e.g. "k2.5", "k3", "coder"). Overrides the parent session default.',
+      ),
     resume: z
       .string()
       .optional()
@@ -239,7 +247,7 @@ export class AgentTool implements BuiltinTool<AgentToolInput> {
         throw new Error(`Agent instance "${resumeAgentId}" does not exist`);
       }
       await this.ensureOwnedIdleSubagent(resumeAgentId, target);
-      this.realignChildModel(target);
+      this.realignChildModel(target, args.model);
       agentId = target.id;
       profileName =
         target.accessor.get(IAgentProfileService).data().profileName ?? RESUMED_LABEL;
@@ -257,10 +265,11 @@ export class AgentTool implements BuiltinTool<AgentToolInput> {
       }
       const resolvedThinkingLevel =
         args.thinking_level ?? profile.thinkingLevel ?? own.thinkingLevel;
+      const resolvedModel = args.model ?? profile.model ?? own.modelAlias;
       const created = await this.lifecycle.create({
         binding: {
           profile: profile.name,
-          model: own.modelAlias,
+          model: resolvedModel,
           thinking: resolvedThinkingLevel,
           cwd: own.cwd,
         },
@@ -323,8 +332,8 @@ export class AgentTool implements BuiltinTool<AgentToolInput> {
     }
   }
 
-  private realignChildModel(target: IAgentScopeHandle): void {
-    const modelAlias = this.profile.data().modelAlias;
+  private realignChildModel(target: IAgentScopeHandle, argsModel?: string): void {
+    const modelAlias = argsModel ?? this.profile.data().modelAlias;
     if (modelAlias === undefined) {
       throw new Error('Caller agent has no model bound');
     }

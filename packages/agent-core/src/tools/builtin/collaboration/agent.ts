@@ -72,6 +72,14 @@ export const AgentToolInputSchema = z.preprocess(
       .describe(
         'Optional per-call thinking effort level for this subagent turn ("off", "low", "medium", "high", "xhigh", "max"). Overrides parent session default.',
       ),
+    model: z
+      .string()
+      .trim()
+      .min(1)
+      .optional()
+      .describe(
+        'Optional model name or alias to use for this subagent (e.g. "k2.5", "k3", "coder"). Overrides parent session default model.',
+      ),
     resume: z
       .string()
       .optional()
@@ -209,6 +217,7 @@ export class AgentTool implements BuiltinTool<AgentToolInput> {
         prompt: args.prompt,
         description: args.description,
         thinkingLevel: args.thinking_level,
+        model: args.model,
         runInBackground,
         signal: controller.signal,
       };

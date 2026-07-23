@@ -21,6 +21,8 @@ export const RawAgentProfileSchema = z.object({
   tools: z.array(z.string()).optional(),
   whenToUse: z.string().optional(),
   thinking_level: z.string().optional(),
+  model: z.string().optional(),
+  model_alias: z.string().optional(),
   subagents: z.record(z.string(), RawSubagentProfileSchema).optional(),
 });
 
@@ -54,5 +56,6 @@ export interface ResolvedAgentProfile {
   tools: string[];
   whenToUse?: string;
   thinkingLevel?: string;
+  model?: string;
   subagents?: Record<string, ResolvedAgentProfile>;
 }

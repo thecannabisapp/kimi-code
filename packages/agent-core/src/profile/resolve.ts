@@ -15,6 +15,7 @@ interface MergedAgentProfile {
   readonly tools: string[];
   readonly whenToUse?: string | undefined;
   readonly thinkingLevel?: string | undefined;
+  readonly model?: string | undefined;
   readonly subagents?: Record<string, RawSubagentProfile> | undefined;
 }
 
@@ -101,6 +102,7 @@ function resolveMergedProfile(
     tools: profile.tools !== undefined ? [...profile.tools] : [...(parent?.tools ?? [])],
     whenToUse: profile.whenToUse ?? parent?.whenToUse,
     thinkingLevel: profile.thinking_level ?? parent?.thinkingLevel,
+    model: profile.model ?? profile.model_alias ?? parent?.model,
     subagents: cloneSubagents(profile.subagents),
   };
 
@@ -116,6 +118,7 @@ function toResolvedProfile(merged: MergedAgentProfile): ResolvedAgentProfile {
     tools: [...merged.tools],
     whenToUse: merged.whenToUse,
     thinkingLevel: merged.thinkingLevel,
+    model: merged.model,
   };
 }
 

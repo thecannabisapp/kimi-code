@@ -59,6 +59,7 @@ export interface AgentProfile {
   readonly description?: string;
   readonly whenToUse?: string;
   readonly thinkingLevel?: string;
+  readonly model?: string;
   readonly tools: readonly string[];
   systemPrompt(context: AgentProfileContext): string;
   readonly promptPrefix?: (ctx: AgentProfilePromptPrefixContext) => Promise<string>;

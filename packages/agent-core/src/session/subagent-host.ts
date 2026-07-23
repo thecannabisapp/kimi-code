@@ -113,6 +113,7 @@ export interface RunSubagentOptions {
   readonly prompt: string;
   readonly description: string;
   readonly thinkingLevel?: string;
+  readonly model?: string;
   readonly swarmIndex?: number;
   readonly runInBackground: boolean;
   readonly signal: AbortSignal;
@@ -188,8 +189,9 @@ export class SessionSubagentHost {
     const completion = this.runWithActiveChild(agentId, options, async (runOptions) => {
       this.emitSubagentSpawned(parent, agentId, profileName, runOptions);
       try {
+        const resolvedModel = runOptions.model ?? parent.config.modelAlias;
         const resolvedThinking = runOptions.thinkingLevel ?? child.config.thinkingEffort;
-        child.config.update({ modelAlias: parent.config.modelAlias, thinkingEffort: resolvedThinking });
+        child.config.update({ modelAlias: resolvedModel, thinkingEffort: resolvedThinking });
         return await this.runPromptTurn(parent, agentId, child, profileName, runOptions);
       } catch (error) {
         this.emitSubagentFailed(parent, agentId, runOptions, error);
@@ -434,9 +436,10 @@ export class SessionSubagentHost {
     options?: RunSubagentOptions,
   ): Promise<void> {
     const resolvedThinking = options?.thinkingLevel ?? profile.thinkingLevel ?? parent.config.thinkingEffort;
+    const resolvedModel = options?.model ?? profile.model ?? parent.config.modelAlias;
     child.config.update({
       cwd: parent.config.cwd,
-      modelAlias: parent.config.modelAlias,
+      modelAlias: resolvedModel,
       thinkingEffort: resolvedThinking,
     });
 

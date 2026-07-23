@@ -58,6 +58,14 @@ export const AgentSwarmToolInputSchema = z
       .describe(
         'Optional thinking effort level for all subagents spawned in this swarm ("off", "low", "medium", "high", "xhigh", "max").',
       ),
+    model: z
+      .string()
+      .trim()
+      .min(1)
+      .optional()
+      .describe(
+        'Optional model name or alias to use for subagents spawned in this swarm (e.g. "k2.5", "k3", "coder"). Overrides parent session default model.',
+      ),
   })
   .strict();
 
@@ -151,6 +159,7 @@ export class AgentSwarmTool implements BuiltinTool<AgentSwarmToolInput> {
         prompt: spec.prompt,
         description: childDescription(args.description, spec.index, descriptionName),
         thinkingLevel: args.thinking_level,
+        model: args.model,
         swarmIndex: spec.index,
         runInBackground: false,
         swarmItem: spec.item,

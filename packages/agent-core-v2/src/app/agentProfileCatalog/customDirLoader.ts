@@ -16,6 +16,8 @@ export interface YamlAgentProfileSpec {
   readonly description?: string;
   readonly whenToUse?: string;
   readonly thinking_level?: string;
+  readonly model?: string;
+  readonly model_alias?: string;
   readonly systemPromptPath?: string;
   readonly promptVars?: Record<string, string>;
   readonly tools?: readonly string[];
@@ -56,6 +58,7 @@ export function loadAgentProfilesFromDir(agentDir: string): void {
       ...config.promptVars,
     };
     const thinkingLevel = config.thinking_level ?? parentConfig?.thinking_level;
+    const model = config.model ?? config.model_alias ?? parentConfig?.model ?? parentConfig?.model_alias;
 
     const promptPath = config.systemPromptPath ?? parentConfig?.systemPromptPath;
     let basePromptTemplate = '';
@@ -78,6 +81,7 @@ export function loadAgentProfilesFromDir(agentDir: string): void {
       description: config.description ?? parentConfig?.description,
       whenToUse: config.whenToUse ?? parentConfig?.whenToUse,
       thinkingLevel,
+      model,
       tools: mergedTools,
       systemPrompt: (context) => renderSystemPrompt(compiledPrompt, context, mergedTools),
     };
