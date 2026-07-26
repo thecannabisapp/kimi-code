@@ -132,6 +132,8 @@ const MIGRATE_CLI_OPTIONS: CLIOptions = {
   skillsDirs: [],
   agentsDir: undefined,
   addDirs: [],
+  agent: undefined,
+  agentFiles: [],
 };
 
 export function main(): void {

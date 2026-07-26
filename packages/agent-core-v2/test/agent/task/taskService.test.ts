@@ -26,13 +26,15 @@ import {
 } from '#/agent/task/task';
 import { renderNotificationXml } from '#/agent/task/notificationXml';
 import { AgentTaskService } from '#/agent/task/taskService';
-import { ProcessTask } from '#/os/backends/node-local/tools/process-task';
+import { ProcessTask } from '#/agent/tools/os/bash/process-task';
 import type { IProcess } from '#/session/process/processRunner';
 import { IConfigRegistry, IConfigService } from '#/app/config/config';
 import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory';
 import type { ContextMessage } from '#/agent/contextMemory/types';
 import { IAgentLoopService } from '#/agent/loop/loop';
 import { IAgentScopeContext, makeAgentScopeContext } from '#/agent/scopeContext/scopeContext';
+import { IAgentStateService } from '#/agent/state/agentState';
+import { AgentStateService } from '#/agent/state/agentStateService';
 import { ISessionContext, makeSessionContext } from '#/session/sessionContext/sessionContext';
 import { IAtomicDocumentStore } from '#/persistence/interface/atomicDocumentStore';
 import { IFileSystemStorageService } from '#/persistence/interface/storage';
@@ -148,6 +150,7 @@ describe('AgentTaskService', () => {
       flush: async () => {},
       close: async () => {},
     });
+    ix.set(IAgentStateService, new AgentStateService());
     ix.set(IAgentTaskService, new SyncDescriptor(AgentTaskService));
   });
   afterEach(() => disposables.dispose());
@@ -161,6 +164,71 @@ describe('AgentTaskService', () => {
     expect(listed[0]?.kind).toBe('process');
     expect(await svc.readOutput(id)).toBe('');
     await svc.stop(id);
+  });
+
+  function capturingWire(): { dispatched: { type: string; payload: unknown }[] } {
+    const dispatched: { type: string; payload: unknown }[] = [];
+    ix.stub(IWireService, {
+      ...stubWireService(),
+      dispatch: (...ops: { type: string; payload: unknown }[]) => {
+        dispatched.push(...ops);
+      },
+    } as IWireService);
+    return { dispatched };
+  }
+
+  function outputtingTask(output: string): AgentTask {
+    return {
+      ...fakeProcessTask(),
+      start: async (sink) => {
+        sink.appendOutput(output);
+        await sink.settle({ status: 'completed' });
+      },
+    };
+  }
+
+  it('task.terminated dispatch carries the retained output tail as outputTail', async () => {
+    const { dispatched } = capturingWire();
+    const svc = ix.get(IAgentTaskService);
+    const taskId = svc.registerTask(outputtingTask('line one\nline two\n'));
+
+    await svc.wait(taskId, 1000);
+
+    const terminated = dispatched.filter((op) => op.type === 'task.terminated');
+    expect(terminated).toHaveLength(1);
+    expect(terminated[0]?.payload).toMatchObject({
+      info: { taskId, status: 'completed' },
+      outputTail: 'line one\nline two\n',
+    });
+  });
+
+  it('task.terminated outputTail is bounded to the last 4 KiB of retained output', async () => {
+    const { dispatched } = capturingWire();
+    const svc = ix.get(IAgentTaskService);
+    const taskId = svc.registerTask(outputtingTask('x'.repeat(8 * 1024)));
+
+    await svc.wait(taskId, 1000);
+
+    const terminated = dispatched.find((op) => op.type === 'task.terminated');
+    const payload = terminated?.payload as { outputTail?: string };
+    expect(payload.outputTail).toBe('x'.repeat(4 * 1024));
+  });
+
+  it('task.terminated dispatch omits outputTail when the task produced no output', async () => {
+    const { dispatched } = capturingWire();
+    const svc = ix.get(IAgentTaskService);
+    const taskId = svc.registerTask({
+      ...fakeProcessTask(),
+      start: async (sink) => {
+        await sink.settle({ status: 'completed' });
+      },
+    });
+
+    await svc.wait(taskId, 1000);
+
+    const terminated = dispatched.find((op) => op.type === 'task.terminated');
+    const payload = terminated?.payload as { outputTail?: string };
+    expect(payload.outputTail).toBeUndefined();
   });
 
   function stubTaskConfig(value: unknown): void {
@@ -431,6 +499,7 @@ describe('AgentTaskService', () => {
     );
     ix.stub(IAtomicDocumentStore, docs);
     ix.stub(IFileSystemStorageService, bytes);
+    ix.set(IAgentStateService, new AgentStateService());
     ix.set(IAgentTaskService, new SyncDescriptor(AgentTaskService));
     return ix;
   }

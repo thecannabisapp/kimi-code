@@ -25,30 +25,41 @@
  * compacts and re-enqueues it — so the loop only learns caught-or-not, while
  * an unclaimed or uncaught error fails the turn. Emits `turn.*` / delta
  * events through `event`, persists loop events through `contextMemory`, and
- * reads the step budget from `config`. Bound at Agent scope.
+ * reads the step budget from `config`. The plain-data loop state
+ * (`nextReservedTurnId`, `lastRequestTraceId`, `disposing`) is registered
+ * into `agentState` (`IAgentStateService`) and read/written through it;
+ * `pendingTurns` and `activeTurnJob` stay plain fields because a `TurnJob`
+ * holds resources (`AbortController`, controlled promises, a
+ * `StepRequestQueue`) that must not be snapshotted, alongside the mechanism
+ * resources (`standaloneStepQueue`, `pendingAssignments`, `errorHandlers`,
+ * `settleWaiters`, `activeRequestTrace`). Bound at Agent
+ * scope. The `turnEvents` import is load-bearing beyond the prompt-text
+ * helper: it loads the `DomainEventMap` augmentation for the `turn.*` / delta
+ * events published here, which lives with the event definitions.
  */
 
 import { randomUUID } from 'node:crypto';
 
 import { createControlledPromise } from '@antfu/utils';
 
-import { InstantiationType } from '#/_base/di/extensions';
 import { Disposable, toDisposable, type IDisposable } from '#/_base/di/lifecycle';
-import { LifecycleScope, registerScopedService } from '#/_base/di/scope';
+import { LifecycleScope, ScopeActivation, registerScopedService } from '#/_base/di/scope';
+import { defineState } from '#/_base/state/stateRegistry';
 import { abortError, isAbortError, isUserCancellation, userCancellationReason } from '#/_base/utils/abort';
 import { toErrorMessage } from '#/_base/errors/errorMessage';
-import { IAgentLLMRequesterService, type LLMRequestFinish } from '#/agent/llmRequester/llmRequester';
-import type { LLMRequestTrace } from '#/app/llmProtocol/requestTrace';
+import { IAgentLLMRequesterService, type AgentLLMRequestFinish } from '#/agent/llmRequester/llmRequester';
+import type { LLMRequestTrace } from '#/kosong/contract/requestTrace';
 import { IAgentToolExecutorService } from '#/agent/toolExecutor/toolExecutor';
 import { IConfigService } from '#/app/config/config';
 import { IEventBus } from '#/app/event/eventBus';
-import { type FinishReason } from '#/app/llmProtocol/finishReason';
-import { type StreamedMessagePart } from '#/app/llmProtocol/message';
-import { type TokenUsage } from '#/app/llmProtocol/usage';
+import { type FinishReason } from '#/kosong/contract/provider';
+import { type StreamedMessagePart } from '#/kosong/contract/message';
+import { type TokenUsage } from '#/kosong/contract/usage';
 import { BugIndicatingError, ErrorCodes, Error2, isError2, toKimiErrorPayload } from '#/errors';
 import { OrderedHookSlot } from '#/hooks';
 
 import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory';
+import { IAgentStateService } from '#/agent/state/agentState';
 import { IAgentTelemetryContextService } from '#/app/telemetry/agentTelemetryContext';
 import type {
   TurnEndedEvent as TurnEndedTelemetryEvent,
@@ -81,13 +92,20 @@ import {
   type TurnSeed,
 } from './stepRequest';
 import { StepRequestQueue, type StepRequestBatch } from './stepRequestQueue';
+import { isDisplayablePromptOrigin, turnPromptText } from './turnEvents';
 import { cancelTurn, promptTurn, TurnModel } from './turnOps';
-// Loads the `DomainEventMap` augmentation for the `turn.*` / delta events this
-// service publishes (the augmentation lives with the event definitions;
-// without an import it would not enter every consumer's program).
-import './turnEvents';
 
 export type LoopInterruptReason = 'aborted' | 'max_steps' | 'error';
+
+export const loopNextReservedTurnIdKey = defineState<number | undefined>(
+  'loop.nextReservedTurnId',
+  () => undefined as number | undefined,
+);
+export const loopLastRequestTraceIdKey = defineState<string | undefined>(
+  'loop.lastRequestTraceId',
+  () => undefined as string | undefined,
+);
+export const loopDisposingKey = defineState<boolean>('loop.disposing', () => false);
 
 export class AgentLoopService extends Disposable implements IAgentLoopService {
   declare readonly _serviceBrand: undefined;
@@ -102,11 +120,8 @@ export class AgentLoopService extends Disposable implements IAgentLoopService {
   private readonly errorHandlers: LoopErrorHandler[] = [];
   private readonly pendingTurns: TurnJob[] = [];
   private activeTurnJob: TurnJob | undefined;
-  private nextReservedTurnId: number | undefined;
   private readonly settleWaiters: Array<() => void> = [];
   private activeRequestTrace: LLMRequestTrace | undefined;
-  private lastRequestTraceId: string | undefined;
-  private disposing = false;
 
   constructor(
     @IAgentContextMemoryService private readonly context: IAgentContextMemoryService,
@@ -117,8 +132,36 @@ export class AgentLoopService extends Disposable implements IAgentLoopService {
     @IWireService private readonly wire: IWireService,
     @ITelemetryService private readonly telemetry: ITelemetryService,
     @IAgentTelemetryContextService private readonly telemetryContext: IAgentTelemetryContextService,
+    @IAgentStateService private readonly states: IAgentStateService,
   ) {
     super();
+    this.states.register(loopNextReservedTurnIdKey);
+    this.states.register(loopLastRequestTraceIdKey);
+    this.states.register(loopDisposingKey);
+  }
+
+  private get nextReservedTurnId(): number | undefined {
+    return this.states.get(loopNextReservedTurnIdKey);
+  }
+
+  private set nextReservedTurnId(value: number | undefined) {
+    this.states.set(loopNextReservedTurnIdKey, value);
+  }
+
+  private get lastRequestTraceId(): string | undefined {
+    return this.states.get(loopLastRequestTraceIdKey);
+  }
+
+  private set lastRequestTraceId(value: string | undefined) {
+    this.states.set(loopLastRequestTraceIdKey, value);
+  }
+
+  private get disposing(): boolean {
+    return this.states.get(loopDisposingKey);
+  }
+
+  private set disposing(value: boolean) {
+    this.states.set(loopDisposingKey, value);
   }
 
   override dispose(): void {
@@ -360,7 +403,12 @@ export class AgentLoopService extends Disposable implements IAgentLoopService {
     this.wire.dispatch(promptTurn({ input: job.seed.input, origin }));
     job.turn.state = 'running';
     this.activeTurnJob = job;
-    this.eventBus.publish({ type: 'turn.started', turnId: job.turn.id, origin });
+    this.eventBus.publish({
+      type: 'turn.started',
+      turnId: job.turn.id,
+      origin,
+      prompt: isDisplayablePromptOrigin(origin) ? turnPromptText(job.seed.input) : undefined,
+    });
     void this.runTurn(job.turn, job.ready).then(job.result.resolve, job.result.reject);
   }
 
@@ -373,9 +421,17 @@ export class AgentLoopService extends Disposable implements IAgentLoopService {
     const telemetryContext = this.telemetryContext.get();
     const turnTelemetry = this.telemetry.withContext(telemetryContext);
     const { mode, provider_type, protocol } = telemetryContext;
+    let thinkingEffort: string | undefined;
     let result: TurnResult | undefined;
     try {
-      const started: TurnStartedTelemetryEvent = { turn_id: turn.id, mode, provider_type, protocol };
+      thinkingEffort = this.llmRequester.prepareTurnConfig(turn.id)?.thinkingEffort;
+      const started: TurnStartedTelemetryEvent = {
+        turn_id: turn.id,
+        mode,
+        provider_type,
+        protocol,
+        thinking_effort: thinkingEffort,
+      };
       turnTelemetry.track2('turn_started', started);
       result = await this.run({
         turnId: turn.id,
@@ -411,6 +467,7 @@ export class AgentLoopService extends Disposable implements IAgentLoopService {
             interrupt_reason: interruptReasonFor(result),
             provider_type,
             protocol,
+            thinking_effort: thinkingEffort,
             trace_id: traceId,
           };
           turnTelemetry.track2('turn_interrupted', interrupted);
@@ -423,6 +480,7 @@ export class AgentLoopService extends Disposable implements IAgentLoopService {
         mode,
         provider_type,
         protocol,
+        thinking_effort: thinkingEffort,
         trace_id: traceId,
       };
       turnTelemetry.track2('turn_ended', ended);
@@ -749,7 +807,7 @@ export class AgentLoopService extends Disposable implements IAgentLoopService {
     turnId: number,
     currentStep: number,
     stepUuid: string,
-    response: LLMRequestFinish,
+    response: AgentLLMRequestFinish,
   ): void {
     for (const part of response.message.content) {
       this.context.appendLoopEvent({
@@ -768,7 +826,7 @@ export class AgentLoopService extends Disposable implements IAgentLoopService {
     signal: AbortSignal,
     currentStep: number,
     stepUuid: string,
-    response: LLMRequestFinish,
+    response: AgentLLMRequestFinish,
     trace: LLMRequestTrace,
   ): Promise<FinishReason> {
     let finishReason = response.providerFinishReason ?? 'completed';
@@ -814,7 +872,7 @@ export class AgentLoopService extends Disposable implements IAgentLoopService {
     signal: AbortSignal,
     currentStep: number,
     stepUuid: string,
-    response: LLMRequestFinish,
+    response: AgentLLMRequestFinish,
     finishReason: FinishReason,
     markStepStarted: () => void,
   ): void {
@@ -878,7 +936,7 @@ export class AgentLoopService extends Disposable implements IAgentLoopService {
     stepId: string,
     usage: TokenUsage,
     finishReason: string,
-    response: LLMRequestFinish,
+    response: AgentLLMRequestFinish,
   ): void {
     this.eventBus.publish({
       type: 'turn.step.completed',
@@ -1044,6 +1102,6 @@ registerScopedService(
   LifecycleScope.Agent,
   IAgentLoopService,
   AgentLoopService,
-  InstantiationType.Eager,
+  ScopeActivation.OnScopeCreated,
   'loop',
 );
