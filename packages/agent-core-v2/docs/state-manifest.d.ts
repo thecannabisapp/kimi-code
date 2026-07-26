@@ -184,6 +184,8 @@ export interface SessionStateSnapshot {
         readonly name: string;
         readonly description?: string;
         readonly whenToUse?: string;
+        readonly thinkingLevel?: string;
+        readonly model?: string;
         readonly override?: boolean;
         readonly tools?: readonly string[];
         readonly disallowedTools?: readonly string[];
@@ -248,6 +250,8 @@ export interface SessionStateSnapshot {
     readonly name: string;
     readonly description?: string;
     readonly whenToUse?: string;
+    readonly thinkingLevel?: string;
+    readonly model?: string;
     readonly override?: boolean;
     readonly tools?: readonly string[];
     readonly disallowedTools?: readonly string[];
@@ -1002,7 +1006,7 @@ export interface AgentStateSnapshot {
   'llmRequester.lastConfigLogSignature': string | undefined;
   'llmRequester.mediaDegradedTurns': Set<number>;
   'llmRequester.mediaStrippedTurns': Map<number, /* MediaStripSnapshot — packages/agent-core-v2/src/agent/contextProjector/contextProjector.ts */ {
-    readonly "__@mediaStripSnapshotBrand@2657": undefined;
+    readonly "__@mediaStripSnapshotBrand@2659": undefined;
   }>;
   'llmRequester.turnConfigs': Map<number, /* TurnRequestConfig — packages/agent-core-v2/src/agent/llmRequester/llmRequesterService.ts */ {
     readonly resolved: /* ProfileModelContext — packages/agent-core-v2/src/agent/profile/profile.ts */ {

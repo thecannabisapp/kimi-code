@@ -375,7 +375,8 @@ describe('SessionSubagentHost', () => {
 
   it('respects profile thinkingLevel and explicit option thinkingLevel over parent thinkingEffort', async () => {
     const parent = testAgent();
-    parent.configure({ thinkingEffort: 'high' });
+    parent.configure();
+    parent.agent.config.update({ thinkingEffort: 'high' });
     const child = testAgent({
       type: 'sub',
       permission: { parent: parent.agent.permission },
@@ -399,8 +400,7 @@ describe('SessionSubagentHost', () => {
         systemPrompt: () => 'agent prompt',
       },
     };
-    const session = fakeSession(parent.agent, child.agent);
-    session.options.profiles = customProfiles;
+    const session = fakeSession(parent.agent, child.agent, {}, customProfiles);
     const host = new SessionSubagentHost(session, 'main');
 
     await host.spawn({
@@ -1625,6 +1625,7 @@ function fakeSession(
   parent: Agent,
   child: Agent,
   metadataAgents: Session['metadata']['agents'] = {},
+  profiles?: Record<string, ResolvedAgentProfile>,
 ) {
   const agents = new Map<string, Agent>([['main', parent]]);
   if (metadataAgents['agent-0'] !== undefined) {
@@ -1632,7 +1633,7 @@ function fakeSession(
   }
   return {
     agents,
-    options: { kimiHomeDir: undefined },
+    options: { kimiHomeDir: undefined, profiles },
     metadata: {
       createdAt: '2026-01-01T00:00:00.000Z',
       updatedAt: '2026-01-01T00:00:00.000Z',

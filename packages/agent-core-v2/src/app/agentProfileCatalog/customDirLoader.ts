@@ -8,7 +8,7 @@ import yaml from 'js-yaml';
 
 import type { AgentProfile } from './agentProfileCatalog';
 import { registerAgentProfile } from './contribution';
-import { renderSystemPrompt } from './profile-shared';
+import { renderPromptTemplate, skillActiveFor } from './profile-shared';
 
 export interface YamlAgentProfileSpec {
   readonly name: string;
@@ -73,7 +73,7 @@ export function loadAgentProfilesFromDir(agentDir: string): void {
       }
     }
 
-    const roleAdditional = mergedPromptVars.roleAdditional ?? '';
+    const roleAdditional = mergedPromptVars['roleAdditional'] ?? '';
     const compiledPrompt = basePromptTemplate.replace(/\{\{\s*ROLE_ADDITIONAL\s*\}\}/g, roleAdditional);
 
     const profile: AgentProfile = {
@@ -83,7 +83,8 @@ export function loadAgentProfilesFromDir(agentDir: string): void {
       thinkingLevel,
       model,
       tools: mergedTools,
-      systemPrompt: (context) => renderSystemPrompt(compiledPrompt, context, mergedTools),
+      systemPrompt: (context) =>
+        renderPromptTemplate(compiledPrompt, context, { skillActive: skillActiveFor(mergedTools) }),
     };
 
     registerAgentProfile(profile);
