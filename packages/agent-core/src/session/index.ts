@@ -1072,14 +1072,18 @@ export class Session {
   ): ResolvedAgentProfile | undefined {
     const profileName = agent.config.profileName;
     if (profileName === undefined) return undefined;
+    // Honour `--agents-dir` custom profiles on resume; without this the
+    // restored handle points at the bundled default and the next compaction's
+    // refreshSystemPrompt() re-renders the default prompt over the custom one.
+    const profiles = this.options.profiles ?? DEFAULT_AGENT_PROFILES;
     if (meta.type === 'sub') {
       const parentProfileName = parentAgent?.config.profileName;
       return (
-        DEFAULT_AGENT_PROFILES[parentProfileName ?? 'agent']?.subagents?.[profileName] ??
-        DEFAULT_AGENT_PROFILES['agent']?.subagents?.[profileName]
+        profiles[parentProfileName ?? 'agent']?.subagents?.[profileName] ??
+        profiles['agent']?.subagents?.[profileName]
       );
     }
-    return DEFAULT_AGENT_PROFILES[profileName];
+    return profiles[profileName];
   }
 
   private nextGeneratedAgentId(): string {
