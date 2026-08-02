@@ -1,5 +1,5 @@
 /**
- * `goal` domain (L4) — `IAgentGoalService` implementation.
+ * `goal` domain — `IAgentGoalService` implementation.
  *
  * Owns the main-agent goal lifecycle; persists the goal in the `wire`
  * `GoalModel` (`GoalState | null`) through the `goal.create` / `goal.update` /
@@ -11,10 +11,7 @@
  * `wallClockResumedAt` anchor is
  * persisted at create/resume boundaries so recovery can settle crash-spanning
  * elapsed time without periodic writes. A `forked` wire Op clears the Model
- * at a fork boundary; the `goal.*` payload shapes are registered in
- * `PersistedOpMap` (`#/wire/types`) inside `goalOps` because they still ride
- * the Agent wire journal restored into the Model.
- * Injects reminders through
+ * at a fork boundary. Injects reminders through
  * `contextInjector`, drives continuation turns by enqueueing `newTurn`
  * `StepRequest`s onto `loop` (the continuation message materializes when the
  * loop pops it), accounts live
@@ -59,6 +56,7 @@ import {
   type EnqueueReceipt,
 } from '#/agent/loop/loop';
 import { LOOP_CONTROL_SECTION, type LoopControl } from '#/agent/loop/configSection';
+import { LoopErrors } from '#/agent/loop/errors';
 import { ContinuationStepRequest, MessageStepRequest } from '#/agent/loop/stepRequest';
 import { IAgentSystemReminderService } from '#/agent/systemReminder/systemReminder';
 import { IAgentScopeContext } from '#/agent/scopeContext/scopeContext';
@@ -174,6 +172,13 @@ const GOAL_CONTINUATION_PROMPT = [
   'threshold is met and you cannot make meaningful progress without user input or an',
   'external-state change, call UpdateGoal with `blocked`; do not keep reporting the blocker while',
   'leaving the goal active. Do not ask the user for input unless a real blocker prevents progress.',
+].join(' ');
+
+const GOAL_STEP_CAP_CONTINUATION_PROMPT = [
+  'The previous goal turn reached the per-turn step limit before finishing its work,',
+  'so a new turn was started for you. Pick up where that turn stopped and keep each',
+  'slice of work small enough to fit the limit.',
+  GOAL_CONTINUATION_PROMPT,
 ].join(' ');
 
 interface GoalForkNoticeState {
@@ -617,7 +622,7 @@ export class AgentGoalService extends Disposable implements IAgentGoalService {
     const state = this.requireState();
     const snapshot = this.toSnapshot(state);
     if (state.status === 'active' && this.liveTurnId !== undefined) {
-      this.loopService.cancel(this.liveTurnId);
+      this.loopService.cancel(this.liveTurnId, abortError('Goal cancelled'));
     }
     this.clearInternal(actor);
     if (actor === 'user') {
@@ -840,10 +845,12 @@ export class AgentGoalService extends Disposable implements IAgentGoalService {
       return;
     }
     if (goalId === undefined || lifecycleGoalId === undefined) return;
+    const stepCapped = isMaxStepsTurnFailure(result);
     if (
-      result.reason === 'blocked' ||
-      result.reason === 'cancelled' ||
-      result.reason === 'failed'
+      !stepCapped &&
+      (result.reason === 'blocked' ||
+        result.reason === 'cancelled' ||
+        result.reason === 'failed')
     ) {
       await this.settleAbnormalTurn(result, lifecycleGoalId);
       return;
@@ -853,7 +860,7 @@ export class AgentGoalService extends Disposable implements IAgentGoalService {
     const state = this.goalState;
     if (state === null || state.status !== 'active' || state.goalId !== lifecycleGoalId) return;
     if (this.blockIfBudgetReached(state) !== null) return;
-    this.launchContinuationTurn(lifecycleGoalId);
+    this.launchContinuationTurn(lifecycleGoalId, stepCapped);
   }
 
   private clearTurnTracking(
@@ -913,12 +920,17 @@ export class AgentGoalService extends Disposable implements IAgentGoalService {
     } catch {}
   }
 
-  private launchContinuationTurn(goalId: string): void {
+  private launchContinuationTurn(goalId: string, stepCapped = false): void {
     if (!this.isActiveGoal(goalId)) return;
     if (this.pendingContinuation !== undefined) return;
     const message: ContextMessage = {
       role: 'user',
-      content: [{ type: 'text', text: GOAL_CONTINUATION_PROMPT }],
+      content: [
+        {
+          type: 'text',
+          text: stepCapped ? GOAL_STEP_CAP_CONTINUATION_PROMPT : GOAL_CONTINUATION_PROMPT,
+        },
+      ],
       toolCalls: [],
       origin: GOAL_CONTINUATION_ORIGIN,
     };
@@ -973,18 +985,10 @@ export class AgentGoalService extends Disposable implements IAgentGoalService {
     const pending = this.pendingContinuation;
     if (preserveLiveContinuation && pending?.turnId === this.liveTurnId) return;
     this.pendingContinuation = undefined;
-    const aborted =
-      reason === undefined ? pending?.receipt.abort() : pending?.receipt.abort(reason);
-    if (
-      pending !== undefined &&
-      !aborted &&
-      pending.turnId !== undefined
-    ) {
-      if (reason === undefined) {
-        this.loopService.cancel(pending.turnId);
-      } else {
-        this.loopService.cancel(pending.turnId, reason);
-      }
+    const cancellation = reason ?? abortError('Goal continuation cancelled');
+    const aborted = pending?.receipt.abort(cancellation);
+    if (pending !== undefined && !aborted && pending.turnId !== undefined) {
+      this.loopService.cancel(pending.turnId, cancellation);
     }
   }
 
@@ -1271,6 +1275,13 @@ function isTerminalUpdateGoalResult(
   if (!isPlainRecord(args)) return false;
   const status = args['status'];
   return status === 'complete' || status === 'blocked';
+}
+
+function isMaxStepsTurnFailure(result: Pick<TurnEndedEvent, 'reason' | 'error'>): boolean {
+  return (
+    result.reason === 'failed' &&
+    normalizeGoalErrorPayload(result.error).code === LoopErrors.codes.LOOP_MAX_STEPS_EXCEEDED
+  );
 }
 
 function goalFailurePauseReason(error: unknown): string {

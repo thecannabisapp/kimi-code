@@ -6,6 +6,7 @@ import type {
   SpawnSubagentOptions,
   SubagentHandle,
 } from './subagent-host';
+import type { SubagentModelChoice } from './subagent-binding';
 import { isUserCancellation } from '../utils/abort';
 
 /*
@@ -51,6 +52,11 @@ type BaseQueuedSubagentTask<T> = {
   readonly runInBackground: boolean;
   readonly timeout?: number;
   readonly signal?: AbortSignal;
+  readonly modelChoice?: SubagentModelChoice;
+  // Custom per-spawn overrides (Agent/AgentSwarm `thinking_level` / `model`
+  // args): forwarded into runOptions so they reach configureChild/resume.
+  readonly thinkingLevel?: string;
+  readonly model?: string;
 };
 
 export type SpawnQueuedSubagentTask<T = unknown> = BaseQueuedSubagentTask<T> & {
@@ -305,6 +311,8 @@ export class SubagentBatch<T> {
       prompt: task.prompt,
       description: task.description,
       swarmIndex: task.swarmIndex,
+      thinkingLevel: task.thinkingLevel,
+      model: task.model,
       runInBackground: task.runInBackground,
       signal: attempt.controller.signal,
       onReady: () => {
@@ -324,6 +332,7 @@ export class SubagentBatch<T> {
         const spawnOptions: SpawnSubagentOptions = {
           profileName: task.profileName,
           swarmItem: task.swarmItem,
+          modelChoice: task.modelChoice,
           ...runOptions,
         };
         handle = await this.launcher.spawn(spawnOptions);

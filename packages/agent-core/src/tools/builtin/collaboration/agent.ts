@@ -29,6 +29,7 @@ import {
   type SessionSubagentHost,
   type SubagentHandle,
 } from '../../../session/subagent-host';
+import { stripSubagentModelParameter } from '../../../session/subagent-binding';
 import { isUserCancellation } from '../../../utils/abort';
 import { AgentBackgroundTask, type BackgroundManager } from '../../../agent/background';
 import { toInputJsonSchema } from '../../support/input-schema';
@@ -78,7 +79,7 @@ export const AgentToolInputSchema = z.preprocess(
       .min(1)
       .optional()
       .describe(
-        'Optional model name or alias to use for this subagent (e.g. "k2.5", "k3", "coder"). Overrides parent session default model.',
+        'Optional model for the new subagent: an explicit model name or alias (e.g. "k2.5", "k3"), or "secondary" / "primary" when the secondary-model experiment is enabled ("secondary" uses the configured secondary model, "primary" the model you are running on). Only applies when spawning a new agent — a resumed agent keeps its bound model.',
       ),
     resume: z
       .string()
@@ -118,10 +119,13 @@ const BACKGROUND_AGENT_UNAVAILABLE =
 
 // ── AgentTool class ──────────────────────────────────────────────────
 
+const AGENT_TOOL_PARAMETERS = toInputJsonSchema(AgentToolInputSchema);
+const AGENT_TOOL_PARAMETERS_NO_MODEL = stripSubagentModelParameter(AGENT_TOOL_PARAMETERS);
+
 export class AgentTool implements BuiltinTool<AgentToolInput> {
   readonly name: string = 'Agent';
   readonly description: string;
-  readonly parameters: Record<string, unknown> = toInputJsonSchema(AgentToolInputSchema);
+  readonly parameters: Record<string, unknown>;
   constructor(
     private readonly subagentHost: SessionSubagentHost,
     private readonly backgroundManager: BackgroundManager,
@@ -130,6 +134,12 @@ export class AgentTool implements BuiltinTool<AgentToolInput> {
       log?: Logger;
       allowBackground?: boolean | undefined;
       subagentTimeoutMs?: number | undefined;
+      subagentModelDescription?: string;
+      showModelPreferences?: boolean;
+      // Mirrors the `secondary-model` experiment: off (the default), the
+      // no-op `model` parameter is stripped from the advertised schema so the
+      // secondary-model concept never enters the prompt.
+      modelChoiceEnabled?: boolean;
     },
   ) {
     const log = options?.log;
@@ -137,13 +147,25 @@ export class AgentTool implements BuiltinTool<AgentToolInput> {
     // `0` is preserved (not normalized): `0 ?? DEFAULT_SUBAGENT_TIMEOUT_MS`
     // stays `0`, and the BackgroundManager arms no timer for it.
     this.subagentTimeoutMs = options?.subagentTimeoutMs;
-    const typeLines = buildSubagentDescriptions(subagents);
+    this.parameters =
+      options?.modelChoiceEnabled === true
+        ? AGENT_TOOL_PARAMETERS
+        : AGENT_TOOL_PARAMETERS_NO_MODEL;
+    const typeLines = buildSubagentDescriptions(
+      subagents,
+      options?.showModelPreferences ?? false,
+    );
     const baseDescription = `${AGENT_DESCRIPTION_BASE}\n\n${
       this.allowBackground ? AGENT_BACKGROUND_DESCRIPTION : AGENT_BACKGROUND_DISABLED_DESCRIPTION
     }`;
-    this.description = typeLines
-      ? `${baseDescription}\n\nAvailable agent types (pass via subagent_type):\n${typeLines}`
-      : baseDescription;
+    const sections = [baseDescription];
+    if (typeLines) {
+      sections.push(`Available agent types (pass via subagent_type):\n${typeLines}`);
+    }
+    if (options?.subagentModelDescription !== undefined) {
+      sections.push(options.subagentModelDescription);
+    }
+    this.description = sections.join('\n\n');
     this.log = log;
   }
 
@@ -212,12 +234,16 @@ export class AgentTool implements BuiltinTool<AgentToolInput> {
       }
 
       const operation = resumeAgentId !== undefined && resumeAgentId.length > 0 ? 'resume' : 'spawn';
+      // "primary"/"secondary" are symbolic choices for the secondary-model
+      // binding; anything else is an explicit model name/alias override.
+      const modelChoice =
+        args.model === 'primary' || args.model === 'secondary' ? args.model : undefined;
       const runOptions = {
         parentToolCallId: toolCallId,
         prompt: args.prompt,
         description: args.description,
         thinkingLevel: args.thinking_level,
-        model: args.model,
+        model: modelChoice === undefined ? args.model : undefined,
         runInBackground,
         signal: controller.signal,
       };
@@ -228,6 +254,7 @@ export class AgentTool implements BuiltinTool<AgentToolInput> {
             ? await this.subagentHost.resume(resumeAgentId!, runOptions)
             : await this.subagentHost.spawn({
                 profileName: requestedProfileName ?? 'coder',
+                modelChoice,
                 ...runOptions,
               });
       } catch (error) {
@@ -389,7 +416,10 @@ function launchErrorMessage(error: unknown, signal: AbortSignal): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function buildSubagentDescriptions(subagents: ResolvedAgentProfile['subagents']): string {
+function buildSubagentDescriptions(
+  subagents: ResolvedAgentProfile['subagents'],
+  showModelPreferences: boolean,
+): string {
   if (subagents === undefined) return '';
   return Object.entries(subagents)
     .map(([name, subagent]) => {
@@ -397,8 +427,19 @@ function buildSubagentDescriptions(subagents: ResolvedAgentProfile['subagents'])
         (part): part is string => part !== undefined && part.length > 0,
       );
       const header = details.length === 0 ? `- ${name}` : `- ${name}: ${details.join(' ')}`;
-      if (subagent.tools.length === 0) return header;
-      return `${header}\n  Tools: ${subagent.tools.join(', ')}`;
+      const deniedExact = new Set(
+        (subagent.disallowedTools ?? []).filter((tool) => !tool.startsWith('mcp__')),
+      );
+      const shownTools = subagent.tools.filter((tool) => !deniedExact.has(tool));
+      const lines = [header];
+      if (showModelPreferences && subagent.modelPreference !== undefined) {
+        lines.push(`  Model preference: ${subagent.modelPreference}`);
+      }
+      if (shownTools.length > 0) lines.push(`  Tools: ${shownTools.join(', ')}`);
+      if (subagent.disallowedTools !== undefined && subagent.disallowedTools.length > 0) {
+        lines.push(`  Disabled: ${subagent.disallowedTools.join(', ')}`);
+      }
+      return lines.join('\n');
     })
     .join('\n');
 }

@@ -7,6 +7,7 @@ import {
   type QueuedSubagentTask,
   type SessionSubagentHost,
 } from '../../../session/subagent-host';
+import { stripSubagentModelParameter } from '../../../session/subagent-binding';
 import { ToolAccesses } from '../../../loop/tool-access';
 import type { ExecutableToolContext, ExecutableToolResult, ToolExecution } from '../../../loop/types';
 import { toInputJsonSchema } from '../../support/input-schema';
@@ -30,6 +31,14 @@ export const AgentSwarmToolInputSchema = z
       .optional()
       .describe(
         'Subagent type used for every new subagent spawned from items; defaults to coder when omitted. Resumed subagents always keep their original type, so passing subagent_type together with resume_agent_ids is allowed — it only affects the item-based spawns.',
+      ),
+    model: z
+      .string()
+      .trim()
+      .min(1)
+      .optional()
+      .describe(
+        'Optional model for every new subagent spawned from items: an explicit model name or alias (e.g. "k2.5", "k3"), or "secondary" / "primary" when the secondary-model experiment is enabled ("secondary" uses the configured secondary model, "primary" the model you are running on). Resumed subagents keep their bound model.',
       ),
     prompt_template: z
       .string()
@@ -56,15 +65,7 @@ export const AgentSwarmToolInputSchema = z
       .enum(['off', 'low', 'medium', 'high', 'xhigh', 'max'])
       .optional()
       .describe(
-        'Optional thinking effort level for all subagents spawned in this swarm ("off", "low", "medium", "high", "xhigh", "max").',
-      ),
-    model: z
-      .string()
-      .trim()
-      .min(1)
-      .optional()
-      .describe(
-        'Optional model name or alias to use for subagents spawned in this swarm (e.g. "k2.5", "k3", "coder"). Overrides parent session default model.',
+        'Optional thinking effort level for all subagents spawned in this swarm ("off", "low", "medium", "high", "xhigh", "max"). Overrides parent session default.',
       ),
   })
   .strict();
@@ -97,10 +98,13 @@ interface SwarmRunResult {
   readonly error?: string;
 }
 
+const AGENT_SWARM_PARAMETERS = toInputJsonSchema(AgentSwarmToolInputSchema);
+const AGENT_SWARM_PARAMETERS_NO_MODEL = stripSubagentModelParameter(AGENT_SWARM_PARAMETERS);
+
 export class AgentSwarmTool implements BuiltinTool<AgentSwarmToolInput> {
   readonly name = 'AgentSwarm' as const;
-  readonly description = AGENT_SWARM_DESCRIPTION;
-  readonly parameters: Record<string, unknown> = toInputJsonSchema(AgentSwarmToolInputSchema);
+  readonly description: string;
+  readonly parameters: Record<string, unknown>;
 
   constructor(
     private readonly subagentHost: SessionSubagentHost,
@@ -108,7 +112,20 @@ export class AgentSwarmTool implements BuiltinTool<AgentSwarmToolInput> {
     // `0` = no timeout, preserved on purpose (`0 ?? DEFAULT` stays `0`);
     // SubagentBatch arms no timer for non-positive timeouts.
     private readonly subagentTimeoutMs?: number,
-  ) {}
+    subagentModelDescription?: string,
+    // Mirrors the `secondary-model` experiment: off (the default), the no-op
+    // `model` parameter is stripped from the advertised schema so the
+    // secondary-model concept never enters the prompt.
+    modelChoiceEnabled = false,
+  ) {
+    this.description =
+      subagentModelDescription === undefined
+        ? AGENT_SWARM_DESCRIPTION
+        : `${AGENT_SWARM_DESCRIPTION}\n\n${subagentModelDescription}`;
+    this.parameters = modelChoiceEnabled
+      ? AGENT_SWARM_PARAMETERS
+      : AGENT_SWARM_PARAMETERS_NO_MODEL;
+  }
 
   resolveExecution(args: AgentSwarmToolInput): ToolExecution {
     const agentCount = (args.items?.length ?? 0) + Object.keys(args.resume_agent_ids ?? {}).length;
@@ -150,6 +167,10 @@ export class AgentSwarmTool implements BuiltinTool<AgentSwarmToolInput> {
   ): Promise<string> {
     const profileName = normalizeOptionalString(args.subagent_type) ?? DEFAULT_SUBAGENT_TYPE;
     const specs = createAgentSwarmSpecs(args, (agentId) => this.subagentHost.getSwarmItem(agentId));
+    // "primary"/"secondary" are symbolic choices for the secondary-model
+    // binding; anything else is an explicit model name/alias override.
+    const modelChoice =
+      args.model === 'primary' || args.model === 'secondary' ? args.model : undefined;
     const tasks = specs.map((spec): QueuedSubagentTask<AgentSwarmSpec> => {
       const descriptionName = spec.kind === 'resume' ? 'resume' : profileName;
       const common = {
@@ -159,12 +180,13 @@ export class AgentSwarmTool implements BuiltinTool<AgentSwarmToolInput> {
         prompt: spec.prompt,
         description: childDescription(args.description, spec.index, descriptionName),
         thinkingLevel: args.thinking_level,
-        model: args.model,
+        model: modelChoice === undefined ? args.model : undefined,
         swarmIndex: spec.index,
         runInBackground: false,
         swarmItem: spec.item,
         signal,
         timeout: this.subagentTimeoutMs ?? DEFAULT_SUBAGENT_TIMEOUT_MS,
+        modelChoice,
       };
       if (spec.kind === 'resume') {
         return {

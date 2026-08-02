@@ -1,5 +1,5 @@
 /**
- * `fullCompaction` domain (L4) — `IAgentFullCompactionService` implementation.
+ * `fullCompaction` domain — `IAgentFullCompactionService` implementation.
  *
  * Runs full-history compaction: reserves the per-turn compaction slot, drives
  * the compaction LLM round (with overflow / truncation shrink retries),
@@ -404,8 +404,6 @@ export class AgentFullCompactionService extends Disposable implements IAgentFull
     };
   }
 
-  /** Scope disposal is the fallback abort path; normal agent teardown aborts
-   *  and awaits the exposed task before disposing the scope. */
   override dispose(): void {
     if (this._compacting !== null && !this._compacting.abortController.signal.aborted) {
       this._compacting.abortController.abort();
