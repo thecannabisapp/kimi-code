@@ -143,12 +143,16 @@ describe('AgentTool', () => {
     });
     const properties = (
       tool.parameters as {
-        properties: Record<string, { description?: string; enum?: string[] }>;
+        properties: Record<string, { description?: string; type?: string }>;
       }
     ).properties;
 
-    expect(properties['model']?.enum).toEqual(['primary', 'secondary']);
+    // Widened schema (local customisation): free-form model names/aliases
+    // bind directly; "primary"/"secondary" remain the documented symbolic
+    // values for the secondary-model binding.
+    expect(properties['model']?.type).toBe('string');
     expect(properties['model']?.description).toContain('secondary');
+    expect(properties['model']?.description).toContain('primary');
   });
 
   it('strips the model parameter from the JSON schema by default', () => {

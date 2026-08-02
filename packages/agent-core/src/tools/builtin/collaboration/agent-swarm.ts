@@ -7,7 +7,7 @@ import {
   type QueuedSubagentTask,
   type SessionSubagentHost,
 } from '../../../session/subagent-host';
-import { stripSubagentModelParameter } from '../../../session/subagent-binding';
+import { stripSubagentModelParameter, type SubagentModelChoice } from '../../../session/subagent-binding';
 import { ToolAccesses } from '../../../loop/tool-access';
 import type { ExecutableToolContext, ExecutableToolResult, ToolExecution } from '../../../loop/types';
 import { toInputJsonSchema } from '../../support/input-schema';
@@ -169,7 +169,7 @@ export class AgentSwarmTool implements BuiltinTool<AgentSwarmToolInput> {
     const specs = createAgentSwarmSpecs(args, (agentId) => this.subagentHost.getSwarmItem(agentId));
     // "primary"/"secondary" are symbolic choices for the secondary-model
     // binding; anything else is an explicit model name/alias override.
-    const modelChoice =
+    const modelChoice: SubagentModelChoice | undefined =
       args.model === 'primary' || args.model === 'secondary' ? args.model : undefined;
     const tasks = specs.map((spec): QueuedSubagentTask<AgentSwarmSpec> => {
       const descriptionName = spec.kind === 'resume' ? 'resume' : profileName;

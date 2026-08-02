@@ -29,7 +29,7 @@ import {
   type SessionSubagentHost,
   type SubagentHandle,
 } from '../../../session/subagent-host';
-import { stripSubagentModelParameter } from '../../../session/subagent-binding';
+import { stripSubagentModelParameter, type SubagentModelChoice } from '../../../session/subagent-binding';
 import { isUserCancellation } from '../../../utils/abort';
 import { AgentBackgroundTask, type BackgroundManager } from '../../../agent/background';
 import { toInputJsonSchema } from '../../support/input-schema';
@@ -236,7 +236,7 @@ export class AgentTool implements BuiltinTool<AgentToolInput> {
       const operation = resumeAgentId !== undefined && resumeAgentId.length > 0 ? 'resume' : 'spawn';
       // "primary"/"secondary" are symbolic choices for the secondary-model
       // binding; anything else is an explicit model name/alias override.
-      const modelChoice =
+      const modelChoice: SubagentModelChoice | undefined =
         args.model === 'primary' || args.model === 'secondary' ? args.model : undefined;
       const runOptions = {
         parentToolCallId: toolCallId,

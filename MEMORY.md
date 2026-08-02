@@ -1,5 +1,20 @@
 # Memory
 
+## 2026-08-02 — Upstream merge v0.31.1 + resume profile-handle fix
+
+- Merged `MoonshotAI/kimi-code` `upstream/main` at v0.31.1 (62 commits, v0.29.1 → v0.31.1) into `main` (`35b89dce3`).
+- Pre-merge fix (`42a8e6789`): `Session.resolvePersistedProfile` (agent-core v1) looked persisted profiles up ONLY in `DEFAULT_AGENT_PROFILES` — after a `--agents-dir` session was resumed, `activeProfile` pointed at the bundled default and the next compaction's `refreshSystemPrompt()` re-rendered the default system prompt over the custom one. Now resolves from `options.profiles` first.
+- Upstream shipped its OWN file-based profile system (the big structural change): `profile/agentfile/` (`SessionAgentProfileCatalog`, discovery, `--agent <name>` / `--agent-file <path>` CLI flags, `config.extraAgentDirs`, plugin agent roots, catalog snapshot persisted in session metadata). v2 got the matching "Workspace domain + agent-profile registry extension point" refactor which DELETED `agentProfileCatalogService.ts` — do not re-add its export.
+- `--agents-dir` coexistence strategy (union, custom dir wins): `core-impl` now passes `profiles: this.agentsDir === undefined ? undefined : profiles` into `Session` (BOTH createSession and resume paths); Session/subagent-host prefer `options.profiles` when set and fall back to `agentCatalog` (`createMain`, resume-empty-prompt bootstrap, `resolvePersistedProfile`, `subagent-host.resolveProfile`). Rationale: `resolveAgentProfiles()` always returns a record (defaults when unset), so presence of `options.profiles` must mean "custom dir given" — passing defaults unconditionally would mask upstream's `--agent` selection.
+- Subagent model/thinking customisation re-reconciled with upstream's new v1 spawn binding (`session/subagent-binding.ts`, `resolveSpawnBinding`, `SubagentModelChoice`):
+  - v1 `configureChild(parent, child, profile, options?, modelChoice?)`: `options.model ?? profile.model ?? binding.modelAlias`, `options.thinkingLevel ?? profile.thinkingLevel ?? binding.thinkingEffort` — thinking NEVER silently inherits the parent.
+  - v1 resume: explicit `runOptions.model`/`thinkingLevel` win; model inheritance follows upstream's `secondary-model` flag (on: keep spawn-bound model; off: inherit parent); thinking keeps the child's own.
+  - v1 Agent/AgentSwarm tool `model` arg split at the edge: `'primary'/'secondary'` → `modelChoice` (symbolic binding), anything else → explicit `RunSubagentOptions.model`. Both schemas widened to free-form string (typed const `SubagentModelChoice | undefined` needed — TS narrowing doesn't flow through the ternary).
+  - FIXED a latent HEAD bug: AgentSwarm set `thinkingLevel`/`model` on queued tasks but `SubagentBatch.runAttempt` never forwarded them into `runOptions` — swarm-level overrides were a silent no-op. `BaseQueuedSubagentTask` now carries both fields through.
+- Upstream v0.31.1 Agent-tool tests assert `model` schema is `enum ['secondary','primary']`; our widened string schema fails them — the two tests now assert `type: 'string'` + description mentions secondary/primary (test updated, not implementation).
+- Snapshot/manifest regen ritual unchanged: `pnpm --filter @moonshot-ai/agent-core-v2 gen:state-manifest` + `npx vitest run -u` on `test/agent/loop/loop.test.ts` and `test/tool/tool.test.ts`. NOTE: vitest ran the whole v2 suite despite the file filter; the 5 failures under full-suite `-u` load were the known resource-contention timeouts — full v2 suite passes clean (285/285, 4349/4349) without `-u`.
+- Gates: typecheck/lint/build green; v1 subagent-host + profile tests 112/112; lint shows pre-existing upstream `catch-error-name` warnings in `unexpectedError.ts` (warnings only, exit 0).
+
 ## 2026-07-26 — Upstream merge v0.29.1
 
 - Merged `MoonshotAI/kimi-code` `upstream/main` at v0.29.1 (88 commits, v0.26.0 → v0.29.1) into `main` (`ff17b8dfe`).
