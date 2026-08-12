@@ -1,5 +1,21 @@
 # Memory
 
+## 2026-08-12 — Upstream merge v0.35.0
+
+- Merged `MoonshotAI/kimi-code` `upstream/main` at v0.35.0 (105 commits, v0.31.1 → v0.35.0) into `main`.
+- Pre-merge commit (`9ac59fe35`): v1 resumed subagents now keep their own bound model — `subagent-host` resume resolves `runOptions.model ?? child.config.modelAlias ?? parent.config.modelAlias` and `reInheritParentModel` skips children that carry their own `modelAlias` (previously a resumed child was realigned to the parent's current model when the `secondary-model` flag was off). 48/48 subagent-host tests.
+- 5 conflicts, resolved to preserve customisations:
+  - `kimi-tui.ts`: union — upstream's `if (!trustPromptStartedLoop) this.startEventLoop()` guard (trust prompt may start the loop first) PLUS our `mountChromeOverlay()` in the migration branch.
+  - `agentSwarmTool.ts` (v2): kept our `args.thinking_level ?? targetProfile.thinkingLevel ?? resolved.thinking` chain; upstream's new `displayModel` is NOT threaded through the swarm binding (binding type unchanged `{ model, thinking? }`).
+  - `configSection.ts` (v2): adopted upstream's `{ model, thinking?, displayModel }` return type; kept our explicit model-name early return as `{ model: requested, displayModel: requested }` (an explicit alias is never the secondary derived id).
+  - `loop.test.ts` + `tool.test.ts` (v2): inline-snapshot conflicts only (`llm.tools_snapshot` hash + embedded tool JSON). Kept HEAD within blocks, then regenerated with `vitest run -u` (140/140). Regenerated snapshots strip the `model` param when the `secondary-model` flag is off (`stripSubagentModelParameter`) — expected; the dedicated schema tests assert the free-form `model`/`thinking_level` params directly.
+- `customDirLoader.ts` build break: upstream replaced `renderPromptTemplate` (returned string) with `renderPromptTemplateResult` (returns `{ text, environment }`); profiles now register via `renderSystemPrompt` so environment-disclosure metadata flows. Registration accepts `AgentProfileInput` (at least one of `systemPrompt` / `renderSystemPrompt`; `normalizeAgentProfile` derives the other).
+- `tasks-browser.ts` typecheck break: upstream's new `AgentActivityViewer` (live background agent activity in /tasks, `ad12ad8a1`) needed our chrome-overlay hide/restore replicated — it now records `chromeWasHidden` and hides the overlay exactly like `openOutputViewer`.
+- `fullCompaction.test.ts`: token baselines drifted exactly +164 (`tokens_before` 3294→3458, 14360→14524 ×3, 3301→3465; `tokens_after` 3285→3449; hook `token_count` 3294→3458) because our widened Agent/AgentSwarm schemas grow the tool-definition overhead. Updated expectations, not implementation — same policy as the v0.31.1 schema-test note.
+- Upstream DELETED `apps/kimi-web` (built web assets now committed under `apps/kimi-code/dist-web`, 659 entries, "synced from code-app") and added `packages/acp-server` (flake.nix already covers it upstream). `pnpm install` is REQUIRED post-merge or the acp-server typecheck fails on missing deps.
+- Lint: upstream committed the bundled artifact `apps/kimi-desktop/out/main.cjs`, which fails its own `unbound-method` rules (10 errors). Added `apps/kimi-desktop/out/` to `.oxlintrc.json` `ignorePatterns` — lint now exits 0 (2929 pre-existing warnings).
+- Gates: typecheck / lint / full build green; `apps/kimi-code` 2770/2770. v1 and v2 suites are green except the known full-suite resource-contention flakes (fs-heavy minidb/kap-server/sessionIndex/fileLog/image tests hit ~5 s timeouts under load; every one passes standalone — verified per-file). Do NOT run the root `pnpm test` concurrently with `pnpm build` — it roughly doubles the flake count.
+
 ## 2026-08-02 — Upstream merge v0.31.1 + resume profile-handle fix
 
 - Merged `MoonshotAI/kimi-code` `upstream/main` at v0.31.1 (62 commits, v0.29.1 → v0.31.1) into `main` (`35b89dce3`).

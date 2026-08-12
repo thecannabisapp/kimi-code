@@ -34,7 +34,8 @@ import { randomUUID } from 'node:crypto';
 import { createControlledPromise } from '@antfu/utils';
 
 import { Disposable, toDisposable, type IDisposable } from '#/_base/di/lifecycle';
-import { LifecycleScope, ScopeActivation, registerScopedService } from '#/_base/di/scope';
+import { LifecycleScope } from '#/app/scopes';
+import { ScopeActivation, registerScopedService } from '#/_base/di/scope';
 import { defineState } from '#/_base/state/stateRegistry';
 import { abortError, isAbortError, isUserCancellation, userCancellationReason } from '#/_base/utils/abort';
 import { toErrorMessage } from '#/_base/errors/errorMessage';
@@ -99,6 +100,7 @@ export const loopLastRequestTraceIdKey = defineState<string | undefined>(
 );
 export const loopDisposingKey = defineState<boolean>('loop.disposing', () => false);
 
+// NOTE: stays Disposable — its own 'config' collides with the Fiber
 export class AgentLoopService extends Disposable implements IAgentLoopService {
   declare readonly _serviceBrand: undefined;
 
@@ -250,7 +252,13 @@ export class AgentLoopService extends Disposable implements IAgentLoopService {
 
   tryAcquireQuiescence(): IDisposable | undefined {
     if (this.disposing) throw abortError('Agent loop disposed');
-    if (this.activeTurnJob !== undefined || this.hasPendingRequests()) return undefined;
+    if (
+      this.quiescenceDepth > 0 ||
+      this.activeTurnJob !== undefined ||
+      this.hasPendingRequests()
+    ) {
+      return undefined;
+    }
     this.quiescenceDepth += 1;
     return toDisposable(() => this.releaseQuiescence());
   }
@@ -579,7 +587,7 @@ export class AgentLoopService extends Disposable implements IAgentLoopService {
     options: LoopErrorHandlerRegistrationOptions = {},
   ): IDisposable {
     if (options.before !== undefined && options.after !== undefined) {
-      throw new Error('Loop error handler registration cannot specify both before and after');
+      throw new BugIndicatingError('Loop error handler registration cannot specify both before and after');
     }
     this.deleteErrorHandler(handler.id);
     const target = options.before ?? options.after;
@@ -588,7 +596,7 @@ export class AgentLoopService extends Disposable implements IAgentLoopService {
     } else {
       const targetIndex = this.errorHandlers.findIndex((entry) => entry.id === target);
       if (targetIndex < 0) {
-        throw new Error(`Loop error handler target "${target}" is not registered`);
+        throw new BugIndicatingError(`Loop error handler target "${target}" is not registered`);
       }
       const insertAt = options.before !== undefined ? targetIndex : targetIndex + 1;
       this.errorHandlers.splice(insertAt, 0, handler);
@@ -618,6 +626,7 @@ export class AgentLoopService extends Disposable implements IAgentLoopService {
             begun.step.signal,
             runtime.turnSignal,
             begun.step.number,
+            runtime.job !== undefined && begun.step.number === 1,
             begun.step.uuid,
             options.onStarted,
           );
@@ -802,11 +811,12 @@ export class AgentLoopService extends Disposable implements IAgentLoopService {
     signal: AbortSignal,
     turnSignal: AbortSignal,
     currentStep: number,
+    firstStepOfTurn: boolean,
     stepUuid: string,
     onStarted: ((step: number) => void) | undefined,
   ): Promise<StepExecutionResult> {
     this.activeRequestTrace = undefined;
-    await this.hooks.onWillBeginStep.run({ turnId, step: currentStep, signal });
+    await this.hooks.onWillBeginStep.run({ turnId, step: currentStep, firstStepOfTurn, signal });
     const markStepStarted = this.beginStep(turnId, signal, currentStep, stepUuid, onStarted);
     const streamParts = this.createStreamPartHandler(turnId, markStepStarted);
     const request = this.llmRequester.start(
@@ -837,6 +847,7 @@ export class AgentLoopService extends Disposable implements IAgentLoopService {
       turnId,
       signal,
       currentStep,
+      firstStepOfTurn,
       response.usage,
       finishReason,
     );
@@ -994,12 +1005,14 @@ export class AgentLoopService extends Disposable implements IAgentLoopService {
     turnId: number,
     signal: AbortSignal,
     currentStep: number,
+    firstStepOfTurn: boolean,
     usage: TokenUsage,
     finishReason: FinishReason,
   ): Promise<boolean> {
     const context: AfterStepContext = {
       turnId,
       step: currentStep,
+      firstStepOfTurn,
       signal,
       usage,
       finishReason,
