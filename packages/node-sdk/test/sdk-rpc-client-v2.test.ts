@@ -11,7 +11,7 @@ import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   createKimiHarnessV2,
@@ -30,6 +30,11 @@ import {
   IHostRequestHeaders,
   OsProcessErrors,
 } from '@moonshot-ai/agent-core-v2';
+import { IBuiltinAgentProfileLoader } from '@moonshot-ai/agent-core-v2/app/agentProfileCatalog/builtinAgentProfileLoader';
+import {
+  _clearAgentProfileContributionsForTests,
+  registerAgentProfile,
+} from '@moonshot-ai/agent-core-v2/app/agentProfileCatalog/contribution';
 
 import { McpOAuthService } from '../../agent-core/src/mcp/oauth/service';
 
@@ -294,6 +299,55 @@ describe('SDKRpcClientV2 (agent-core-v2 wiring MVP)', () => {
     } finally {
       await harness.close();
     }
+  });
+
+  describe('agentsDir wiring', () => {
+    beforeEach(() => {
+      _clearAgentProfileContributionsForTests();
+      registerAgentProfile({
+        name: 'agent',
+        systemPrompt: () => 'default builtin profile',
+      });
+    });
+
+    afterEach(() => {
+      _clearAgentProfileContributionsForTests();
+      registerAgentProfile({
+        name: 'agent',
+        systemPrompt: () => 'default builtin profile',
+      });
+    });
+
+    it('honors agentsDir (explicit dir) by loading YAML agent profiles before bootstrap', async () => {
+      const homeDir = await mkdtemp(join(tmpdir(), 'kimi-sdk-v2-'));
+      tempDirs.push(homeDir);
+      const agentsDir = await mkdtemp(join(tmpdir(), 'kimi-sdk-v2-agents-'));
+      tempDirs.push(agentsDir);
+      await writeFile(
+        join(agentsDir, 'custom.yaml'),
+        [
+          'name: yaml-bound',
+          'description: Custom YAML agent profile',
+          'model: yaml-model',
+          'thinking_level: high',
+        ].join('\n'),
+        'utf-8',
+      );
+      const client = new SDKRpcClientV2({ homeDir, identity: TEST_IDENTITY, agentsDir });
+      try {
+        const loader = client.engineAccessor.get(IBuiltinAgentProfileLoader);
+        const profile = loader.get('yaml-bound');
+        expect(profile).toBeDefined();
+        expect(profile).toMatchObject({
+          name: 'yaml-bound',
+          description: 'Custom YAML agent profile',
+          model: 'yaml-model',
+          thinkingLevel: 'high',
+        });
+      } finally {
+        await client.close();
+      }
+    });
   });
 
   it('serves the plugin catalog from the v2 engine on an empty home', async () => {

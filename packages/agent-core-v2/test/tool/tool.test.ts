@@ -192,6 +192,36 @@ function profileCatalogWithPreference(
   };
 }
 
+function profileCatalogWithModelAndThinking(
+  profileName: string,
+  model: string,
+  thinkingLevel: string,
+): ISessionAgentProfileCatalog {
+  const main: AgentProfile = normalizeAgentProfile({
+    name: 'agent',
+    description: 'Main agent',
+    systemPrompt: () => 'main',
+  });
+  const target: AgentProfile = normalizeAgentProfile({
+    name: profileName,
+    description: `${profileName} agent`,
+    model,
+    thinkingLevel,
+    systemPrompt: () => profileName,
+  });
+  return {
+    _serviceBrand: undefined,
+    ready: Promise.resolve(),
+    onDidChange: Event.None as ISessionAgentProfileCatalog['onDidChange'],
+    get: (name) => [main, target].find((profile) => profile.name === name),
+    getDefault: () => main,
+    list: () => [target],
+    inspect: () => undefined,
+    load: async () => {},
+    reload: async () => {},
+  };
+}
+
 function modelCatalogResolving(...aliases: readonly string[]): IModelCatalog {
   return {
     _serviceBrand: undefined,
@@ -1021,6 +1051,36 @@ describe('Agent tool execution contract', () => {
     expect(result.output).toContain('Subagent type "coder" is not allowed for this agent');
     expect(result.output).toContain('explore');
     expect(lifecycle.create).not.toHaveBeenCalled();
+  });
+
+  it('binds a profile-declared model and thinking level when spawning a subagent', async () => {
+    const lifecycle = createAgentLifecycleStub({ createAgentIds: ['agent-child'] });
+    const context = createAgentToolContext(
+      lifecycle,
+      sessionService(
+        ISessionAgentProfileCatalog,
+        profileCatalogWithModelAndThinking('yaml-bound', 'yaml-model', 'high'),
+      ),
+      modelProviderServices(
+        modelCatalogResolving('mock-model', 'yaml-model', 'provider/secondary', SECONDARY_DERIVED_MODEL_ID),
+      ),
+    );
+
+    await executeAgentTool(context, {
+      prompt: 'Investigate',
+      description: 'Find cause',
+      subagent_type: 'yaml-bound',
+    });
+
+    expect(lifecycle.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        binding: expect.objectContaining({
+          profile: 'yaml-bound',
+          model: 'yaml-model',
+          thinking: 'high',
+        }),
+      }),
+    );
   });
 
   it('spawns a subagent type inside the caller allowlist', async () => {
@@ -2464,6 +2524,52 @@ describe('AgentSwarm tool execution contract', () => {
         tasks: [
           expect.objectContaining({ binding: { model: 'mock-model', thinking: 'off' } }),
           expect.objectContaining({ binding: { model: 'mock-model', thinking: 'off' } }),
+        ],
+      }),
+    );
+  });
+
+  it('binds a profile-declared model and thinking level when spawning swarm items', async () => {
+    const runSwarm = vi.fn(
+      async (args: SessionSwarmRunArgs): Promise<readonly SessionSwarmRunResult[]> =>
+        args.tasks.map((task, index) => ({
+          task,
+          agentId: `agent-explore-${String(index + 1)}`,
+          status: 'completed' as const,
+          result: 'ok',
+        })),
+    );
+    const swarmService: ISessionSwarmService = {
+      _serviceBrand: undefined,
+      getSwarmItem: async () => undefined,
+      run: runSwarm as ISessionSwarmService['run'],
+      cancel: () => {},
+    };
+    ctx = createTestAgent(
+      swarmServices(swarmService),
+      sessionService(
+        ISessionAgentProfileCatalog,
+        profileCatalogWithModelAndThinking('explore', 'yaml-swarm-model', 'medium'),
+      ),
+    );
+
+    await executeTool(agentSwarmTool(ctx), {
+      turnId: 0,
+      toolCallId: 'call_swarm',
+      args: {
+        description: 'Review files',
+        prompt_template: 'Review {{item}}',
+        items: ['src/a.ts', 'src/b.ts'],
+        subagent_type: 'explore',
+      },
+      signal,
+    });
+
+    expect(runSwarm).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tasks: [
+          expect.objectContaining({ binding: { model: 'yaml-swarm-model', thinking: 'medium' } }),
+          expect.objectContaining({ binding: { model: 'yaml-swarm-model', thinking: 'medium' } }),
         ],
       }),
     );

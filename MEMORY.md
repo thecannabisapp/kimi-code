@@ -1,5 +1,13 @@
 # Memory
 
+## 2026-08-12 — v2 `--agents-dir` port + chrome-overlay verdict
+
+- `--agents-dir` now works on the DEFAULT v2 engine: `SDKRpcClientV2Options` gained `agentsDir`, and `SDKRpcClientV2` calls `loadAgentProfilesFromDir(options.agentsDir)` BEFORE `bootstrap(...)` in its constructor (`packages/node-sdk/src/sdk-rpc-client-v2.ts`). Ordering matters — the App-scope `builtinAgentProfileLoader` reads the module-level contribution registry at creation; late registration is invisible to sessions. CLI flow was already complete (`options.ts` → `main.ts` → `run-shell`/`run-prompt` → `KimiHarnessOptions.agentsDir` → `createKimiHarnessV2`); the option was just dropped at the `SDKRpcClientV2Options` seam. kap-server (`kimi server`) has no `--agents-dir` flag — out of scope, same as v1.
+- YAML model/thinking on v2: no tool changes needed — the v2 Agent/AgentSwarm tools already resolve `args.model ?? profile.model ?? profile.modelPreference` and `args.thinking_level ?? profile.thinkingLevel ?? resolved.thinking`, and `customDirLoader` maps yaml `model`/`model_alias`/`thinking_level` onto those profile fields.
+- v2 resume semantics VERIFIED (code + test): `resumeAttempt` (`session/swarm/sessionSwarmService.ts`) never re-binds — a resumed child keeps its own persisted binding (the yaml-bound model/thinking from spawn) and never inherits the parent's current model. Pinned by `keeps a resumed child on its own YAML-bound model and thinking level` in `test/session/swarm/sessionSwarm.test.ts`.
+- Contribution registry is module-GLOBAL: tests must use `_clearAgentProfileContributionsForTests` + re-register what they need, or profiles leak between test files.
+- Chrome-overlay verdict (explore audit vs upstream v0.35.0): KEEP the overlay. Upstream renders chrome inline (no pinned chrome, no in-app wheel scrolling); our primary-screen overlay (`chromeOverlay` + `ChromeAwareContainer` bottom padding) is the only thing keeping chrome out of terminal scrollback. Upstream HAS fixed the duplicate-frame class natively (`68ad68621`, `b40bb7139`, `e45832398`, `bb2919eb8`). Dead code note: after `ed53df11c` reverted alternate screen, `ChromeAwareContainer`'s `parseMouseWheel`/scroll-offset bookkeeping is unwired — safe to delete, keep the padding. When `upstream/feat/pi-tui-0.84-fullscreen` merges (TuiAltScreen + ScrollView + VStack dock = pinned chrome + wheel scroll natively, but no native scrollback while running), re-evaluate migrating and deleting our overlay.
+
 ## 2026-08-12 — Upstream merge v0.35.0
 
 - Merged `MoonshotAI/kimi-code` `upstream/main` at v0.35.0 (105 commits, v0.31.1 → v0.35.0) into `main`.

@@ -160,6 +160,7 @@ import {
   applyPromptMetadataUpdate,
   bootstrap,
   DEFAULT_AGENT_PROFILE_NAME,
+  loadAgentProfilesFromDir,
   drainQueryStoreDisposals,
   drainSessionIndexMirror,
   ensureKimiHome,
@@ -342,6 +343,14 @@ export interface SDKRpcClientV2Options {
    * source. Passed into the engine through `BootstrapInput.args.skillDirs`.
    */
   readonly skillDirs?: readonly string[];
+  /**
+   * Explicit agent profile directory for this process (v1's SDK `agentsDir` /
+   * the CLI's `--agents-dir`): YAML agent profiles discovered here are
+   * registered into the App-scope profile contribution registry before
+   * bootstrap, so they replace same-named builtins and are visible to the
+   * session catalog and subagent spawn binding.
+   */
+  readonly agentsDir?: string;
   readonly telemetry?: TelemetryClient;
   readonly onOAuthRefresh?: (outcome: OAuthRefreshOutcome) => void;
   readonly uiMode?: string;
@@ -436,6 +445,15 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
     });
 
     const identity = assertKimiHostIdentity(this.identity);
+
+    // `--agents-dir` (v1 parity): load custom YAML agent profiles into the
+    // module-level contribution registry *before* bootstrap. The App-scope
+    // builtin profile loader reads that registry at creation time, so late
+    // registration would be ignored by already-created sessions.
+    if (options.agentsDir !== undefined) {
+      loadAgentProfilesFromDir(options.agentsDir);
+    }
+
     const { app } = bootstrap(
       {
         homeDir: this.homeDir,

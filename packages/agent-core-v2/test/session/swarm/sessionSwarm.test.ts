@@ -1148,6 +1148,38 @@ describe('SessionSwarmService metadata compatibility', () => {
     );
   });
 
+  it('keeps a resumed child on its own YAML-bound model and thinking level', async () => {
+    agents['yaml-child'] = {
+      labels: { parentAgentId: 'main' },
+    };
+    const child = agentHandle('yaml-child', lifecycle, eventBus, {
+      profileName: 'yaml-bound',
+      modelAlias: 'yaml-model',
+      thinkingLevel: 'high',
+    });
+    handles.set('yaml-child', child);
+    const service = ix.get(ISessionSwarmService);
+
+    await expect(
+      service.run({
+        callerAgentId: 'main',
+        tasks: [resumeSessionTask('yaml-child')],
+      }),
+    ).resolves.toMatchObject([{ status: 'completed', agentId: 'yaml-child' }]);
+
+    expect(createAgent).not.toHaveBeenCalled();
+    expect(child.accessor.get(IAgentProfileService).data().modelAlias).toBe('yaml-model');
+    expect(child.accessor.get(IAgentProfileService).data().thinkingLevel).toBe('high');
+    expect(eventBus.publish).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'subagent.spawned',
+        subagentId: 'yaml-child',
+        model: 'yaml-model',
+        thinkingEffort: 'high',
+      }),
+    );
+  });
+
   it('prefers the spawn task binding over the caller model', async () => {
     const service = ix.get(ISessionSwarmService);
     const spawnTask: SessionSwarmSpawnTask = {
