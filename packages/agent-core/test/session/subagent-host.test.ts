@@ -1179,16 +1179,32 @@ describe('SessionSubagentHost', () => {
     expect(userTextMessages(histories[1] ?? [])).toEqual(['Implement the retry-safe change']);
   });
 
-  it('realigns a resumed subagent to the parent agent current model', async () => {
+  const withSecondaryModels = (config?: KimiConfig): KimiConfig => ({
+    providers: { 'test-provider': { type: 'kimi', apiKey: 'test-key' } },
+    ...config,
+    models: {
+      'cheap-model': {
+        provider: 'test-provider',
+        model: 'cheap-model',
+        maxContextSize: 1_000_000,
+      },
+      '__secondary__': {
+        provider: 'test-provider',
+        model: 'cheap-model',
+        maxContextSize: 65536,
+      },
+    },
+  });
+
+  it('preserves a resumed subagent bound modelAlias', async () => {
     const parent = testAgent();
     parent.configure();
     parent.agent.permission.setMode('yolo');
 
-    const child = testAgent();
+    const child = testAgent({ initialConfig: withSecondaryModels() });
     child.configure({ tools: ['Read'] });
-    // The child was originally spawned with a model that no longer matches the
-    // parent agent's current model (as if the parent ran setModel afterwards).
-    child.agent.config.update({ modelAlias: 'stale-model-from-initial-spawn' });
+    // The child was originally spawned with its own model.
+    child.agent.config.update({ modelAlias: 'cheap-model' });
     child.agent.useProfile(
       profile({ name: 'explore', tools: ['Read'], systemPrompt: 'explore prompt' }),
     );
@@ -1216,10 +1232,9 @@ describe('SessionSubagentHost', () => {
     });
 
     await handle.completion;
-    // resume must realign the child to the parent agent's current model rather
-    // than leave it on the stale model from its initial spawn.
-    expect(child.agent.config.modelAlias).toBe(parent.agent.config.modelAlias);
-    expect(child.agent.config.modelAlias).not.toBe('stale-model-from-initial-spawn');
+    // Resumed subagent keeps its own model from initial spawn rather than
+    // being overwritten by the parent agent's current model.
+    expect(child.agent.config.modelAlias).toBe('cheap-model');
   });
 
   describe('secondary model binding', () => {
@@ -1228,26 +1243,6 @@ describe('SessionSubagentHost', () => {
     const LONG_SUMMARY =
       'Completed the delegated task end to end and reported a technically complete summary so the parent agent can continue without repeating prior work. ' +
       'The report covers the investigation, the changes made, and the verification results in enough detail for the caller to act on directly.';
-    // Harness model registry entries resolvable through the child's
-    // ProviderManager: the secondary alias and the synthesized derived entry
-    // (in production `applySecondaryModelConfig` injects the latter into the
-    // session runtime config).
-    const withSecondaryModels = (config?: KimiConfig): KimiConfig => ({
-      providers: { 'test-provider': { type: 'kimi', apiKey: 'test-key' } },
-      ...config,
-      models: {
-        'cheap-model': {
-          provider: 'test-provider',
-          model: 'cheap-model',
-          maxContextSize: 1_000_000,
-        },
-        '__secondary__': {
-          provider: 'test-provider',
-          model: 'cheap-model',
-          maxContextSize: 65536,
-        },
-      },
-    });
 
     async function spawnChild(options: {
       config?: KimiConfig;

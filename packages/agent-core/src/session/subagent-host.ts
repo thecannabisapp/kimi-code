@@ -204,14 +204,10 @@ export class SessionSubagentHost {
       this.emitSubagentSpawned(parent, agentId, profileName, runOptions);
       try {
         // Custom: explicit per-call overrides win on resume; thinking never
-        // inherits the parent's level. Model inheritance follows upstream's
-        // `secondary-model` semantics (flag on: keep the spawn-bound model).
+        // inherits the parent's level. Resumed subagents keep their own bound
+        // model instead of falling back to the parent's current model.
         const resolvedThinking = runOptions.thinkingLevel ?? child.config.thinkingEffort;
-        const resolvedModel =
-          runOptions.model ??
-          (this.session.experimentalFlags.enabled('secondary-model')
-            ? child.config.modelAlias
-            : parent.config.modelAlias);
+        const resolvedModel = runOptions.model ?? child.config.modelAlias ?? parent.config.modelAlias;
         child.config.update({ modelAlias: resolvedModel, thinkingEffort: resolvedThinking });
         return await this.runPromptTurn(parent, agentId, child, profileName, runOptions);
       } catch (error) {
@@ -546,7 +542,9 @@ export class SessionSubagentHost {
    * invariant).
    */
   private reInheritParentModel(parent: Agent, child: Agent): void {
-    if (this.session.experimentalFlags.enabled('secondary-model')) return;
+    if (this.session.experimentalFlags.enabled('secondary-model') || child.config.modelAlias !== undefined) {
+      return;
+    }
     child.config.update({ modelAlias: parent.config.modelAlias });
   }
 
