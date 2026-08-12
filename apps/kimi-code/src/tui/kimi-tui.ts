@@ -2379,11 +2379,6 @@ export class KimiTUI {
     if (component || trimmed || merged) {
       this.state.ui.requestRender();
     }
-    // If the user is already at the bottom, keep them there as new content
-    // arrives. If they have scrolled up manually, leave the viewport alone.
-    if (this.state.transcriptWrapper.isScrolledToBottom()) {
-      this.state.transcriptWrapper.resetScroll();
-    }
   }
 
   private appendApprovalTranscriptEntry(
@@ -2455,9 +2450,6 @@ export class KimiTUI {
     this.sessionEventHandler.stopAllMcpServerStatusSpinners();
     this.disposeTranscriptChildren();
     this.state.transcriptContainer.clear();
-    // Reset transcript scroll so a switched/replayed session starts at the
-    // bottom rather than inheriting the previous session's viewport.
-    this.state.transcriptWrapper.resetScroll();
     this.btwPanelController.clear();
     this.clearTerminalInlineImages();
     this.state.todoPanel.clear();
