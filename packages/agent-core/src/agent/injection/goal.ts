@@ -166,11 +166,6 @@ function buildGoalReminder(goal: GoalSnapshot): string {
       'call UpdateGoal with `blocked`; do not keep reporting the blocker while leaving the goal ' +
       'active.',
   );
-  lines.push(
-    'If you are waiting for background tasks or subagents to finish, do not poll them with ' +
-      'TaskList. Rely on automatic completion notifications, or use TaskOutput(block=true) with a ' +
-      'reasonable timeout instead of looping.',
-  );
   return lines.join('\n');
 }
 

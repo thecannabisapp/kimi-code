@@ -138,7 +138,6 @@ const MIGRATE_CLI_OPTIONS: CLIOptions = {
   prompt: undefined,
   skillsDirs: [],
   agentsDir: undefined,
-  addDirs: [],
   agent: undefined,
   agentFiles: [],
 };

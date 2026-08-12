@@ -119,7 +119,7 @@ const GOAL_CONTINUATION_PROMPT = [
   'validation, would benefit from clarification, or needs more goal turns. Once the 3-turn',
   'threshold is met and you cannot make meaningful progress without user input or an',
   'external-state change, call UpdateGoal with `blocked`; do not keep reporting the blocker while',
-  'leaving the goal active. Do not ask the user for input unless a real blocker prevents progress.'
+  'leaving the goal active. Do not ask the user for input unless a real blocker prevents progress.',
 ].join(' ');
 
 /**

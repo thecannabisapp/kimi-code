@@ -243,25 +243,6 @@ describe('TasksBrowserApp — full-screen rendering', () => {
     expect(out).toContain('listening on :3000');
   });
 
-  it('formats subagent log events in the Preview Output pane for agent tasks', () => {
-    const out = strip(
-      makeApp({
-        tasks: [task({ taskId: 'agent-bbbbbbbb', kind: 'agent' })],
-        selectedTaskId: 'agent-bbbbbbbb',
-        tailOutput: '[turn 1 started]\n[tool] read_file({"path":"foo.txt"})\n[result] call_abc: ok\n<thinking>\nchecking file\n</thinking>\n[turn 1 ended: success]\nFinished task!',
-      })
-        .render(120)
-        .join('\n'),
-    );
-    expect(out).toContain('Turn 1 started');
-    expect(out).toContain('Using read_file');
-    expect(out).toContain('Result: ok');
-    expect(out).toContain('Thinking...');
-    expect(out).toContain('checking file');
-    expect(out).toContain('Turn 1 ended: success');
-    expect(out).toContain('Finished task!');
-  });
-
   it('shows a loading state when tail is loading', () => {
     const out = strip(
       makeApp({

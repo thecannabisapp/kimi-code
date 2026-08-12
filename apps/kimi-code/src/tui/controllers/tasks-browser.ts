@@ -1,5 +1,5 @@
 import type { BackgroundTaskInfo, Session } from '@moonshot-ai/kimi-code-sdk';
-import type { Component, OverlayHandle, ProcessTerminal, TUI } from '@moonshot-ai/pi-tui';
+import type { Component, ProcessTerminal, TUI } from '@moonshot-ai/pi-tui';
 
 import { AgentActivityViewer, formatSubagentActivityPreview } from '../components/dialogs/agent-activity-viewer';
 import { TaskOutputViewer } from '../components/dialogs/task-output-viewer';
@@ -16,7 +16,6 @@ export interface TasksBrowserHost {
     readonly terminal: ProcessTerminal;
     readonly ui: TUI;
     readonly editor: CustomEditor;
-    readonly chromeOverlay: OverlayHandle | undefined;
   };
   readonly backgroundTasks: ReadonlyMap<string, BackgroundTaskInfo>;
   readonly sessionEventHandler: SessionEventHandler;
@@ -28,7 +27,6 @@ export interface TasksBrowserHost {
 export type TasksBrowserState = {
   component: TasksBrowserApp;
   savedChildren: readonly Component[];
-  chromeWasHidden: boolean;
   filter: TasksFilter;
   selectedTaskId: string | undefined;
   tailOutput: string | undefined;
@@ -41,7 +39,6 @@ export type TasksBrowserState = {
     | {
         component: TaskOutputViewer | AgentActivityViewer;
         savedChildren: readonly Component[];
-        chromeWasHidden: boolean;
         taskId: string;
         output: string;
         refreshId: number;
@@ -89,9 +86,6 @@ export class TasksBrowserController {
       state.terminal,
     );
 
-    const chromeOverlay = state.chromeOverlay;
-    const chromeWasHidden = chromeOverlay?.isHidden() ?? false;
-    chromeOverlay?.setHidden(true);
     const savedChildren = [...state.ui.children];
     state.ui.clear();
     state.ui.addChild(component);
@@ -105,7 +99,6 @@ export class TasksBrowserController {
     this.host.setTasksBrowser({
       component,
       savedChildren,
-      chromeWasHidden,
       filter,
       selectedTaskId,
       tailOutput: undefined,
@@ -134,7 +127,6 @@ export class TasksBrowserController {
     for (const child of browser.savedChildren) {
       state.ui.addChild(child);
     }
-    state.chromeOverlay?.setHidden(browser.chromeWasHidden);
     this.host.setTasksBrowser(undefined);
     state.ui.setFocus(state.editor);
     state.ui.requestRender(true);
@@ -391,9 +383,6 @@ export class TasksBrowserController {
       state.terminal,
     );
 
-    const chromeOverlay = state.chromeOverlay;
-    const chromeWasHidden = chromeOverlay?.isHidden() ?? false;
-    chromeOverlay?.setHidden(true);
     const savedBrowserChildren = [...state.ui.children];
     state.ui.clear();
     state.ui.addChild(viewer);
@@ -407,7 +396,6 @@ export class TasksBrowserController {
     browser.viewer = {
       component: viewer,
       savedChildren: savedBrowserChildren,
-      chromeWasHidden,
       taskId,
       output,
       refreshId: 0,
@@ -436,9 +424,6 @@ export class TasksBrowserController {
       state.terminal,
     );
 
-    const chromeOverlay = state.chromeOverlay;
-    const chromeWasHidden = chromeOverlay?.isHidden() ?? false;
-    chromeOverlay?.setHidden(true);
     const savedBrowserChildren = [...state.ui.children];
     state.ui.clear();
     state.ui.addChild(viewer);
@@ -453,7 +438,6 @@ export class TasksBrowserController {
     browser.viewer = {
       component: viewer,
       savedChildren: savedBrowserChildren,
-      chromeWasHidden,
       taskId,
       output: '',
       refreshId: 0,
@@ -558,7 +542,6 @@ export class TasksBrowserController {
     for (const child of viewer.savedChildren) {
       this.host.state.ui.addChild(child);
     }
-    this.host.state.chromeOverlay?.setHidden(viewer.chromeWasHidden);
     this.host.state.ui.setFocus(browser.component);
     this.host.state.ui.requestRender(true);
   }

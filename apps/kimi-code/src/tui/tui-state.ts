@@ -2,10 +2,7 @@ import {
   Container,
   ProcessTerminal,
   TUI,
-  type OverlayHandle,
 } from '@moonshot-ai/pi-tui';
-
-import { ChromeAwareContainer } from './components/chrome/chrome-aware-container';
 
 import { FooterComponent } from './components/chrome/footer';
 import { GutterContainer } from './components/chrome/gutter-container';
@@ -32,9 +29,6 @@ export interface TUIState {
   ui: TUI;
   terminal: ProcessTerminal;
   transcriptContainer: Container;
-  transcriptWrapper: ChromeAwareContainer;
-  chromeContainer: Container;
-  chromeOverlay: OverlayHandle | undefined;
   activityContainer: Container;
   todoPanelContainer: Container;
   todoPanel: TodoPanelComponent;
@@ -89,31 +83,14 @@ export function createTUIState(options: KimiTUIOptions): TUIState {
   const editor = new CustomEditor(ui, {
     disablePasteBurst: initialAppState.disablePasteBurst ?? DEFAULT_TUI_CONFIG.disablePasteBurst,
   });
-  editorContainer.addChild(editor);
   const footer = new FooterComponent({ ...initialAppState }, () => {
     ui.requestRender();
   });
-  const footerWrap = new GutterContainer(CHROME_GUTTER, CHROME_GUTTER);
-  footerWrap.addChild(footer);
-
-  const chromeContainer = new Container();
-  chromeContainer.addChild(activityContainer);
-  chromeContainer.addChild(todoPanelContainer);
-  chromeContainer.addChild(queueContainer);
-  chromeContainer.addChild(btwPanelContainer);
-  chromeContainer.addChild(editorContainer);
-  chromeContainer.addChild(footerWrap);
-
-  const transcriptWrapper = new ChromeAwareContainer(chromeContainer, ui);
-  transcriptWrapper.addChild(transcriptContainer);
 
   return {
     ui,
     terminal,
     transcriptContainer,
-    transcriptWrapper,
-    chromeContainer,
-    chromeOverlay: undefined,
     activityContainer,
     todoPanelContainer,
     todoPanel,

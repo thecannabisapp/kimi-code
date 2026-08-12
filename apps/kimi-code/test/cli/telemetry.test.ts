@@ -5,8 +5,6 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { initializeServerTelemetry } from '#/cli/telemetry';
-
 const mocks = vi.hoisted(() => ({
   initializeTelemetry: vi.fn(),
   createKimiDeviceId: vi.fn(() => 'device-123'),
@@ -66,6 +64,7 @@ describe('initializeServerTelemetry', () => {
   });
 
   it('configures the sink with ui_mode="web" and the CLI product identity', async () => {
+    const { initializeServerTelemetry } = await import('#/cli/telemetry');
     const client = initializeServerTelemetry({ version: '1.2.3' });
     expect(mocks.initializeTelemetry).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -97,6 +96,7 @@ describe('initializeServerTelemetry', () => {
       config: { defaultModel: 'kimi-k2', telemetry: false },
       fileError: undefined,
     });
+    const { initializeServerTelemetry } = await import('#/cli/telemetry');
     initializeServerTelemetry({ version: '1.2.3' });
 
     expect(mocks.initializeTelemetry).toHaveBeenCalledWith(
@@ -109,6 +109,7 @@ describe('initializeServerTelemetry', () => {
       config: {},
       fileError: new Error('bad toml'),
     });
+    const { initializeServerTelemetry } = await import('#/cli/telemetry');
     initializeServerTelemetry({ version: '1.2.3' });
 
     expect(mocks.initializeTelemetry).toHaveBeenCalledWith(

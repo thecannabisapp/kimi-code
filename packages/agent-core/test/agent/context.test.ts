@@ -5,7 +5,7 @@ import type { Message } from '@moonshot-ai/kosong';
 import { describe, expect, it, vi } from 'vitest';
 
 import { renderNotificationXml } from '../../src/agent/context/notification-xml';
-import { project, trimTrailingOpenToolExchange } from '../../src/agent/context/projector';
+import { project } from '../../src/agent/context/projector';
 import type { ContextMessage } from '../../src/agent/context/types';
 import { buildImageCompressionCaption } from '../../src/tools/support/image-compress';
 import { estimateTokensForMessages } from '../../src/utils/tokens';
@@ -1465,42 +1465,6 @@ describe('Agent context notification projection', () => {
     expect(textOf(messages[1]!)).toBe('No origin prompt');
     expect(textOf(messages[2]!)).toBe('Third real prompt');
   });
-
-  it('trims trailing open tool exchanges from the model-visible messages', () => {
-    const ctx = testAgent();
-    ctx.configure();
-
-    ctx.agent.context.appendUserMessage([{ type: 'text', text: 'hello' }]);
-    ctx.dispatch({
-      type: 'context.append_loop_event',
-      event: { type: 'step.begin', uuid: 'origin-step', turnId: '', step: 1 },
-    });
-    ctx.dispatch({
-      type: 'context.append_loop_event',
-      event: {
-        type: 'tool.call',
-        uuid: 'call_1',
-        turnId: '',
-        step: 1,
-        stepUuid: 'origin-step',
-        toolCallId: 'call_1',
-        name: 'Bash',
-        args: { command: 'echo 1' },
-      },
-    });
-    ctx.dispatch({
-      type: 'context.append_loop_event',
-      event: { type: 'step.end', uuid: 'origin-step', turnId: '', step: 1 },
-    });
-
-    // The tool call does not have a tool.result yet.
-    // So the trailing tool exchange is open.
-    // We expect the assistant message containing the tool call to be trimmed from agent.context.messages.
-    expect(trimTrailingOpenToolExchange(ctx.agent.context.messages)).toMatchObject([
-      { role: 'user', content: [{ type: 'text', text: 'hello' }], toolCalls: [] }
-    ]);
-  });
-
 });
 
 function userMessage(text: string, origin?: ContextMessage['origin']): ContextMessage {

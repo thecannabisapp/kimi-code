@@ -254,15 +254,6 @@ describe('Agent resume', () => {
           ],
         },
       } as unknown as AgentRecord,
-      {
-        type: 'context.append_loop_event',
-        event: {
-          type: 'tool.result',
-          parentUuid: 'call_legacy_bash',
-          toolCallId: 'call_legacy_bash',
-          result: { output: '/home/user' },
-        },
-      },
     ]);
     const ctx = testAgent({ persistence });
 
@@ -1330,7 +1321,6 @@ describe('Agent resume', () => {
       message: expect.objectContaining({ role: 'assistant', content: [{ type: 'text', text: 'first response' }] }),
     });
   });
-
 });
 
 class RecordingAgentPersistence extends InMemoryAgentRecordPersistence {

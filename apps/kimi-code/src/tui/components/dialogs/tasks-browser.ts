@@ -27,7 +27,6 @@ import type { BackgroundTaskInfo, BackgroundTaskStatus } from '@moonshot-ai/kimi
 import { SELECT_POINTER } from '@/tui/constant/symbols';
 import { currentTheme } from '#/tui/theme';
 import { printableChar } from '@/tui/utils/printable-key';
-import { formatSubagentLogLines } from '@/tui/utils/background-task-status';
 
 const ELLIPSIS = '…';
 
@@ -607,12 +606,8 @@ export class TasksBrowserApp extends Container implements Focusable {
     else body = this.props.tailOutput;
 
     const rawLines = body.split('\n');
-    let styled: string[];
-    if (task.kind === 'agent') {
-      styled = formatSubagentLogLines(rawLines).slice(-innerHeight);
-    } else {
-      styled = rawLines.slice(-innerHeight).map((line) => currentTheme.fg('textDim', line));
-    }
+    const tailLines = rawLines.slice(-innerHeight);
+    const styled = tailLines.map((line) => currentTheme.fg('textDim', line));
     while (styled.length < innerHeight) styled.push('');
     return this.renderFrame('Preview Output', styled, width, height);
   }
