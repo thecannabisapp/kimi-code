@@ -13,7 +13,7 @@ import { promptPlatformSelection, promptLogoutProviderSelection } from '#/tui/co
 import { BannerComponent } from '#/tui/components/chrome/banner';
 import { WelcomeComponent } from '#/tui/components/chrome/welcome';
 import { KimiTUI, type KimiTUIStartupInput, type TUIState } from '#/tui/kimi-tui';
-import { REPLAY_TURN_LIMIT } from '#/tui/utils/message-replay';
+import { REPLAY_FETCH_TURN_LIMIT } from '#/tui/utils/message-replay';
 import { copyTextToClipboard } from '#/utils/clipboard/clipboard-text';
 import { quoteShellArg } from '#/utils/shell-quote';
 import {
@@ -326,6 +326,24 @@ describe('KimiTUI startup', () => {
     });
   });
 
+  it('mounts the docked fullscreen layout when KIMI_CODE_TUI_FULL_SCREEN=1', async () => {
+    const harness = makeHarness(makeSession());
+    vi.stubEnv('KIMI_CODE_TUI_FULL_SCREEN', '1');
+    const driver = makeDriver(harness, { ...makeStartupInput(), engineV2: true });
+    vi.unstubAllEnvs();
+
+    // buildLayout() runs in the constructor: fullscreen keeps the root
+    // children list empty and mounts the layout root instead.
+    expect(driver.state.ui.mode).toBe('fullscreen');
+    expect(driver.state.ui.children).toHaveLength(0);
+
+    await expect(driver.init()).resolves.toBe(false);
+    (driver as unknown as { mountFooter(): void }).mountFooter();
+
+    // Dock = 5 chrome containers + footer wrap, below the transcript viewport.
+    expect(driver.state.dockContainer?.children).toHaveLength(6);
+  });
+
   it('shows a session-less notice on v2 startup', async () => {
     const harness = makeHarness(makeSession());
     const driver = makeDriver(harness, { ...makeStartupInput(), engineV2: true });
@@ -542,7 +560,7 @@ describe('KimiTUI startup', () => {
 
     expect(harness.resumeSession).toHaveBeenCalledWith({
       id: 'ses-latest',
-      replayTurnLimit: REPLAY_TURN_LIMIT,
+      replayTurnLimit: REPLAY_FETCH_TURN_LIMIT,
     });
     expect(harness.createSession).not.toHaveBeenCalled();
     expect(driver.state.startupState).toBe('ready');
@@ -2006,7 +2024,7 @@ describe('KimiTUI startup', () => {
 
     expect(harness.resumeSession).toHaveBeenCalledWith({
       id: 'ses-latest',
-      replayTurnLimit: REPLAY_TURN_LIMIT,
+      replayTurnLimit: REPLAY_FETCH_TURN_LIMIT,
     });
     expect(harness.createSession).not.toHaveBeenCalled();
     expect(driver.state.startupState).toBe('ready');
@@ -2026,7 +2044,7 @@ describe('KimiTUI startup', () => {
 
     expect(harness.resumeSession).toHaveBeenCalledWith({
       id: 'ses-target',
-      replayTurnLimit: REPLAY_TURN_LIMIT,
+      replayTurnLimit: REPLAY_FETCH_TURN_LIMIT,
     });
     expect(driver.state.startupState).toBe('ready');
     expect(driver.state.appState.sessionId).toBe('');
@@ -2357,7 +2375,7 @@ describe('KimiTUI startup', () => {
     });
     expect(harness.resumeSession).toHaveBeenCalledWith({
       id: 'ses-target',
-      replayTurnLimit: REPLAY_TURN_LIMIT,
+      replayTurnLimit: REPLAY_FETCH_TURN_LIMIT,
     });
     expect(driver.state.appState.sessionId).toBe('ses-target');
   });

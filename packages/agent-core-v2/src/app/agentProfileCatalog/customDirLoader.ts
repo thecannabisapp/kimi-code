@@ -1,7 +1,3 @@
-/**
- * `agentProfileCatalog` domain (L3) — load custom YAML agent profiles from directory.
- */
-
 import fs from 'node:fs';
 import path from 'node:path';
 import yaml from 'js-yaml';
@@ -45,7 +41,6 @@ export function loadAgentProfilesFromDir(agentDir: string): void {
           rawProfiles.set(parsed.name, parsed);
         }
       } catch {
-        // Skip unparseable profile files silently
       }
     }
   }

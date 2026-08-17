@@ -1,6 +1,21 @@
 # Memory
 
-## 2026-08-12 — TUI convergence: chrome overlay and legacy remnants DROPPED
+## 2026-08-17 — Upstream merge v0.36.1
+
+- Merged `MoonshotAI/kimi-code` `upstream/main` at v0.36.1 (`1ab19190e`, 10 commits, v0.35.0 → v0.36.1) into `main`.
+- Preserved the sanctioned divergence surface:
+  - `--agents-dir` custom profile directory support across CLI (`options/commands/main/run-*`), `node-sdk` (`SDKRpcClientV2Options.agentsDir` / `KimiHarnessOptions.agentsDir`), `agent-core` (v1), and `agent-core-v2` (`customDirLoader.ts`).
+  - Subagent `model` (widened to free-form string) and `thinking_level` ('off'...'max') overrides from YAML profiles and tool arguments (`Agent` and `AgentSwarm`).
+  - Resumes preserve the child's own persisted model and thinking level (verified by `sessionSwarm.test.ts`).
+- Conflict & structural reconciliation:
+  - Swarm tool reorganization: upstream moved v2 swarm tools into `packages/agent-core-v2/src/features/swarm/tools/agent-swarm/`. Maintained our widened `model` schema and `thinking_level` parameters on both `Agent` and `AgentSwarm` tools.
+  - `AgentProfile` reference in `agentTool.ts` and `agentSwarmTool.ts`: mapped `args.model ?? profile.model`.
+  - Upstream `check-no-comments.mjs`: enforced zero comments in `agent-core-v2`, `kap-server`, and `transcript`. Cleaned up comment markers in `customDirLoader.ts`, `customDirLoader.test.ts`, `goalService.ts`, and `goal.test.ts`.
+  - Snapshot updates & compaction token baselines: updated snapshots (`loop.test.ts`, `tool.test.ts`) and token count expectations in `fullCompaction.test.ts`.
+- Gates verified:
+  - Package builds: `pnpm -w run build:packages` exits 0 with full DTS generation.
+  - Linting: `node scripts/check-no-comments.mjs && oxlint --type-aware` exits 0 with 0 errors.
+  - Targeted unit tests: `customDirLoader.test.ts` (2/2), `sessionSwarm.test.ts` (34/34), `sdk-rpc-client-v2.test.ts` (35/35), `loop.test.ts` & `tool.test.ts` (98/98), `fullCompaction.test.ts` (74/74), and `goal.test.ts` (105/105) all passing.
 
 - Owner decision: converge the fork to upstream everywhere except the two sanctioned customisations — (1) `--agents-dir` custom profile dir, (2) subagent Agent/AgentSwarm model + thinking from YAML on spawn and resume (v1 + v2). Everything else is upstream's now.
 - Removed in `fbe230d02` (12 files taken verbatim from `upstream/main`, 2 deleted, 557 lines net): the entire chrome-overlay TUI customisation (`chromeOverlay`, `mountChromeOverlay`, `transcriptWrapper`, `ChromeAwareContainer` + test, every `chromeWasHidden` hide/restore in `tasks-browser.ts` and the approval preview), our task-output-viewer/subagent-event-handler formatting (`formatSubagentLogLine` et al.), the `addDirs: []` default in `main.ts`, the telemetry-test static-import tweak, the v1 goal-reminder anti-polling line, a stray comma in `turn/index.ts`, and the v1 tests for fixes upstream has since absorbed (`trimTrailingOpenToolExchange` coverage in `context.test.ts`, legacy `tool.result` handling in `resume.test.ts` — upstream's projector now exports the same function, proving absorption).

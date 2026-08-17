@@ -1,13 +1,3 @@
-/**
- * Scenario: `loadAgentProfilesFromDir` loads YAML agent profiles into the
- * module-level contribution registry so the App-scope builtin loader sees them
- * at bootstrap time. Exercises the field mapping (name, description, model,
- * thinking_level) and the builtin-override behavior.
- * Run:
- * `pnpm --filter @moonshot-ai/agent-core-v2 exec vitest run
- * test/app/agentProfileCatalog/customDirLoader.test.ts`.
- */
-
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 
