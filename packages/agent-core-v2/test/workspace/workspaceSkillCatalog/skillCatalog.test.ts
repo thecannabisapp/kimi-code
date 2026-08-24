@@ -11,11 +11,11 @@ import {
   _clearScopedRegistryForTests,
   registerScopedService,
 } from '#/_base/di/scope';
-import { Emitter, Event } from '#/_base/event';
+import { AsyncEmitter, Emitter, Event } from '#/_base/event';
 import { IBootstrapService } from '#/app/bootstrap/bootstrap';
 import { IPluginService } from '#/app/plugin/plugin';
 import { PluginService } from '#/app/plugin/pluginService';
-import type { ReloadSummary } from '#/app/plugin/types';
+import type { PluginReloadEvent } from '#/app/plugin/types';
 import { IProviderService } from '#/kosong/provider/provider';
 import {
   IHostFsWatchService,
@@ -29,6 +29,7 @@ import { IWorkspaceStateService } from '#/workspace/state/workspaceState';
 import { WorkspaceStateService } from '#/workspace/state/workspaceStateService';
 import { IWorkspaceContext } from '#/workspace/workspaceContext/workspaceContext';
 import { IConfigService } from '#/app/config/config';
+import { IFlagService } from '#/app/flag/flag';
 import {
   EXTRA_SKILL_DIRS_SECTION,
   MERGE_ALL_AVAILABLE_SKILLS_SECTION,
@@ -54,6 +55,7 @@ import { ILogService } from '#/_base/log/log';
 import { HostFsWatchService } from '#/os/backends/node-local/hostFsWatchService';
 
 import { stubBootstrap } from '../../app/bootstrap/stubs';
+import { stubFlag } from '../../app/flag/stubs';
 import { stubSkill } from '../../app/skillCatalog/stubs';
 import { stubProviderService } from '../../app/provider/stubs';
 import { stubLog } from '../../_base/log/stubs';
@@ -107,7 +109,7 @@ function configStub(): IConfigService & {
 
 function pluginStub(
   skillRoots: readonly SkillRoot[] = [],
-  reloadEmitter?: Emitter<ReloadSummary>,
+  reloadEmitter?: Emitter<PluginReloadEvent>,
 ): IPluginService {
   return {
     _serviceBrand: undefined,
@@ -129,6 +131,7 @@ function pluginStub(
     enabledSessionStarts: async () => [],
     enabledSystemPrompts: async () => [],
     enabledMcpServers: async () => ({}),
+    mcpServerEntries: async () => [],
     enabledHooks: async () => [],
     hasLoadedSnapshot: () => true,
   };
@@ -166,11 +169,12 @@ function makeHost(
   ws: IWorkspaceContext,
   pluginRoots: readonly SkillRoot[] = [],
   explicitDirs?: readonly string[],
-  pluginReloadEmitter?: Emitter<ReloadSummary>,
+  pluginReloadEmitter?: Emitter<PluginReloadEvent>,
 ) {
   const config = configStub();
   const host = createScopedTestHost([
     stubPair(ISkillDiscovery, store),
+    stubPair(IFlagService, stubFlag(true)),
     stubPair(IBootstrapService, stubBootstrap('/home', {}, { skillDirs: explicitDirs })),
     stubPair(IConfigService, config),
     stubPair(IPluginService, pluginStub(pluginRoots, pluginReloadEmitter)),
@@ -384,6 +388,7 @@ describe('WorkspaceSkillCatalogService', () => {
     store.setExtraSkills([stubSkill('extra-only', { description: 'from extra', source: 'extra' })]);
     const ws = workspaceContextStub('/work');
     const host = createScopedTestHost([
+      stubPair(IFlagService, stubFlag(true)),
       stubPair(ISkillDiscovery, store),
       stubPair(IBootstrapService, bootstrapStub),
       stubPair(IConfigService, config),
@@ -420,6 +425,7 @@ describe('WorkspaceSkillCatalogService', () => {
     const config = configStub();
     const ws = workspaceContextStub('/work');
     const host = createScopedTestHost([
+      stubPair(IFlagService, stubFlag(true)),
       stubPair(ISkillDiscovery, store),
       stubPair(IBootstrapService, bootstrapStub),
       stubPair(IConfigService, config),
@@ -580,7 +586,7 @@ describe('WorkspaceSkillCatalogService', () => {
     store.setPluginSkills([
       stubSkill('demo-skill', { source: 'extra', plugin: { id: 'demo' } }),
     ]);
-    const reloadEmitter = new Emitter<ReloadSummary>();
+    const reloadEmitter = new AsyncEmitter<PluginReloadEvent>();
     const pluginRoot: SkillRoot = {
       path: '/plugins/demo/skills',
       source: 'extra',
@@ -600,7 +606,10 @@ describe('WorkspaceSkillCatalogService', () => {
           resolve(sourceId);
         });
       });
-      reloadEmitter.fire({ added: [], removed: [], errors: [] });
+      await reloadEmitter.fireAsyncConcurrent(
+        { added: [], removed: [], errors: [] },
+        new AbortController().signal,
+      );
 
       await expect(refreshed).resolves.toBe('plugin');
     } finally {
@@ -636,6 +645,7 @@ describe('WorkspaceSkillCatalogService', () => {
     };
     const ws = workspaceContextStub('/work');
     const host = createScopedTestHost([
+      stubPair(IFlagService, stubFlag(true)),
       stubPair(ISkillDiscovery, new InMemorySkillDiscovery()),
       stubPair(IBootstrapService, bootstrapStub),
       stubPair(IConfigService, configStub()),
@@ -689,10 +699,11 @@ describe('WorkspaceSkillCatalogService', () => {
   });
 
   it('binds thisArg when forwarding plugin reloads through the plugin skill source', async () => {
-    const reloadEmitter = new Emitter<ReloadSummary>();
+    const reloadEmitter = new AsyncEmitter<PluginReloadEvent>();
     const pluginService = pluginStub([], reloadEmitter);
     const ws = workspaceContextStub('/work');
     const host = createScopedTestHost([
+      stubPair(IFlagService, stubFlag(true)),
       stubPair(ISkillDiscovery, new InMemorySkillDiscovery()),
       stubPair(IBootstrapService, bootstrapStub),
       stubPair(IConfigService, configStub()),
@@ -715,7 +726,10 @@ describe('WorkspaceSkillCatalogService', () => {
         receiver,
       );
 
-      reloadEmitter.fire({ added: [], removed: [], errors: [] });
+      await reloadEmitter.fireAsyncConcurrent(
+        { added: [], removed: [], errors: [] },
+        new AbortController().signal,
+      );
 
       expect(seen).toEqual([receiver]);
       subscription?.dispose();
@@ -749,6 +763,7 @@ describe('WorkspaceSkillCatalogService', () => {
       stubSkill('demo-skill', { source: 'extra', plugin: { id: 'demo' } }),
     ]);
     const host = createScopedTestHost([
+      stubPair(IFlagService, stubFlag(true)),
       stubPair(ISkillDiscovery, store),
       stubPair(IBootstrapService, stubBootstrap(homeDir)),
       stubPair(IConfigService, configStub()),
@@ -860,6 +875,7 @@ describe('WorkspaceSkillCatalogService', () => {
       WorkspaceRootSkillSource,
     );
     const host = createScopedTestHost([
+      stubPair(IFlagService, stubFlag(true)),
       stubPair(ISkillDiscovery, discovery),
       stubPair(IBootstrapService, bootstrapStub),
       stubPair(IConfigService, configStub()),
@@ -896,6 +912,7 @@ describe('WorkspaceSkillCatalogService', () => {
   it('rescans the workspace-root source when a project skill file changes on disk', async () => {
     const workDir = await mkdtemp(join(tmpdir(), 'skill-watch-'));
     const host = createScopedTestHost([
+      stubPair(IFlagService, stubFlag(true)),
       stubPair(IBootstrapService, bootstrapStub),
       stubPair(IConfigService, configStub()),
       stubPair(IPluginService, pluginStub()),
@@ -951,6 +968,7 @@ describe('WorkspaceSkillCatalogService', () => {
     const watchedRuntimeFile = await realpath(runtimeFile);
     let ignored: ((path: string) => boolean) | undefined;
     const host = createScopedTestHost([
+      stubPair(IFlagService, stubFlag(true)),
       stubPair(IBootstrapService, bootstrapStub),
       stubPair(IConfigService, configStub()),
       stubPair(IPluginService, pluginStub()),
@@ -1046,6 +1064,7 @@ describe('WorkspaceSkillCatalogService', () => {
   it('rescans when a skill under a dot directory appears on disk', async () => {
     const workDir = await mkdtemp(join(tmpdir(), 'skill-watch-dot-'));
     const host = createScopedTestHost([
+      stubPair(IFlagService, stubFlag(true)),
       stubPair(IBootstrapService, bootstrapStub),
       stubPair(IConfigService, configStub()),
       stubPair(IPluginService, pluginStub()),

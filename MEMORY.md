@@ -1,5 +1,24 @@
 # Memory
 
+## 2026-08-24 — Upstream merge v0.38.0
+
+- Merged `MoonshotAI/kimi-code` `upstream/main` at v0.38.0 into `main`.
+- Preserved the sanctioned divergence surface and local customisations:
+  - `--agents-dir` custom profile directory support across CLI, `node-sdk` (`SDKRpcClientV2Options.agentsDir` / `KimiHarnessOptions.agentsDir`), and `agent-core-v2` (`customDirLoader.ts`).
+  - Subagent `model` (widened to free-form string) and `thinking_level` ('off'...'max') overrides from YAML profiles and tool arguments (`Agent` and `AgentSwarm`).
+  - Child agent resumes preserve the child's own persisted model and thinking level (verified by `sessionSwarm.test.ts`).
+  - Goal runtime anti-polling safety net: retained `hasActiveBackgroundTasks()` (when `!isWaitForAvailable()`) and `continuationMinIntervalMs` (15s) pacing, while adopting upstream's new `WaitFor` tool and `GOAL_WAIT_FOR_GUIDANCE` when `WaitFor` is active.
+- Integrated upstream 0.38.0 changes:
+  - New `WaitFor` tool: allows autonomous goal and main agent turns to suspend in-turn waiting for background tasks (subagents, background bash commands, questions) without burning continuation turns.
+  - Subagent `fork` parameter on `Agent` and `AgentSwarm` tools to clone caller context into new children.
+  - Goal feature engine migration to XState actor logic (`packages/agent-core-v2/src/features/goal/`).
+  - MCP management routes and protocol contracts (`packages/kap-server/src/routes/v2/mcp.ts`, `packages/klient/src/contract/global/mcpManagement.ts`).
+- Verification & build:
+  - Zero-comment rule: `node scripts/check-no-comments.mjs` passed clean across all 1552 files.
+  - Tests: `goal.test.ts` (147/147), `sessionSwarm.test.ts` (34/34), `tool.test.ts` (110/110), `fullCompaction.test.ts` (75/75), `goalInjection.test.ts` (20/20), `node-sdk` (402/402) all passing.
+  - Package builds: `pnpm -w run build:packages` succeeded with full DTS.
+  - CLI binary: `pnpm --filter @moonshot-ai/kimi-code run build` built `apps/kimi-code/dist/main.mjs` (19.23 MB).
+
 ## 2026-08-17 — Upstream merge v0.36.1
 
 - Merged `MoonshotAI/kimi-code` `upstream/main` at v0.36.1 (`1ab19190e`, 10 commits, v0.35.0 → v0.36.1) into `main`.

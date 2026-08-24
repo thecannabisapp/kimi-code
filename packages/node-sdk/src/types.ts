@@ -290,6 +290,7 @@ export interface AuthenticateMcpServerOptions {
   ) => void | boolean | PromiseLike<void | boolean>;
   readonly signal?: AbortSignal;
   readonly timeoutMs?: number;
+  readonly cwd?: string;
 }
 
 export interface TestMcpServerOptions {
@@ -312,6 +313,13 @@ export interface PlanInfo {
 
 export type SessionPlan = PlanInfo | null;
 
+export type SessionTodoStatus = 'pending' | 'in_progress' | 'done';
+
+export interface SessionTodoItem {
+  readonly title: string;
+  readonly status: SessionTodoStatus;
+}
+
 export interface TokenUsage {
   readonly inputOther: number;
   readonly output: number;
@@ -330,7 +338,8 @@ export interface SessionStatus {
   readonly thinkingEffort: string;
   readonly permission: PermissionMode;
   readonly planMode: boolean;
-  readonly swarmMode?: boolean | undefined;
+  readonly swarmMode?: boolean;
+  readonly towerMode?: boolean;
   readonly contextTokens: number;
   readonly maxContextTokens: number;
   readonly contextUsage: number;

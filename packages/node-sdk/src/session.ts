@@ -36,6 +36,7 @@ import type {
   SessionPlan,
   SessionStatus,
   SessionSummary,
+  SessionTodoItem,
   SessionUsage,
   SkillSummary,
   PluginCommandDef,
@@ -340,6 +341,17 @@ export class Session {
     }
   }
 
+  async setTowerMode(enabled: boolean): Promise<void> {
+    this.ensureOpen();
+    if (typeof enabled !== 'boolean') {
+      throw new KimiError(
+        ErrorCodes.REQUEST_INVALID,
+        'Session tower mode must be a boolean',
+      );
+    }
+    await this.rpc.setTowerMode({ sessionId: this.id, enabled });
+  }
+
   async getPlan(): Promise<SessionPlan> {
     this.ensureOpen();
     return this.rpc.getPlan({ sessionId: this.id });
@@ -367,6 +379,11 @@ export class Session {
   async undoHistory(count: number = 1): Promise<void> {
     this.ensureOpen();
     await this.rpc.undoHistory({ sessionId: this.id, count });
+  }
+
+  async getTodos(): Promise<readonly SessionTodoItem[]> {
+    this.ensureOpen();
+    return this.rpc.getTodos({ sessionId: this.id });
   }
 
   /** Clear this session's model context without creating a new session. */
