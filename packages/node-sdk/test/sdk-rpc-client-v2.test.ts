@@ -39,7 +39,7 @@ import {
   Error2,
   getLiveSessionById,
   HostProcessError,
-  AgentTodo,
+  IAgentTodoService,
   IAgentLifecycleService,
   IAgentTowerService,
   IHostRequestHeaders,
@@ -805,6 +805,45 @@ key = "${titleOAuthRef.key}"
     }
   });
 
+  it('serves suggestFiles through the workspace handler fs service', async () => {
+    const { harness } = await makeHarness();
+    const workDir = await mkdtemp(join(tmpdir(), 'kimi-sdk-v2-work-'));
+    tempDirs.push(workDir);
+    await mkdir(join(workDir, 'src'), { recursive: true });
+    await writeFile(join(workDir, 'src', 'app.ts'), 'app');
+    await writeFile(join(workDir, 'src', 'index.ts'), 'index');
+    await writeFile(join(workDir, 'README.md'), 'readme');
+    try {
+      const matched = await harness.suggestFiles(workDir, { query: 'app', limit: 20 });
+      expect(matched?.items).toContainEqual(
+        expect.objectContaining({ kind: 'file', path: 'src/app.ts', name: 'app.ts' }),
+      );
+      const appItem = matched?.items.find((item) => item.name === 'app.ts');
+      expect(appItem?.matchPositions.length).toBeGreaterThan(0);
+
+      const topLevel = await harness.suggestFiles(workDir, { query: '', limit: 20 });
+      expect(topLevel?.items).toContainEqual(expect.objectContaining({ kind: 'directory', name: 'src' }));
+      expect(topLevel?.items).toContainEqual(expect.objectContaining({ kind: 'file', name: 'README.md' }));
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it('rejects an out-of-range suggestFiles limit before touching the engine', async () => {
+    const { harness } = await makeHarness();
+    const workDir = await mkdtemp(join(tmpdir(), 'kimi-sdk-v2-work-'));
+    tempDirs.push(workDir);
+    try {
+      for (const limit of [0, -1, 201, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+        await expect(harness.suggestFiles(workDir, { query: 'a', limit })).rejects.toMatchObject({
+          code: ErrorCodes.REQUEST_INVALID,
+        });
+      }
+    } finally {
+      await harness.close();
+    }
+  });
+
   it('honors skillDirs (explicit dirs) over default user / project discovery', async () => {
     const homeDir = await mkdtemp(join(tmpdir(), 'kimi-sdk-v2-'));
     tempDirs.push(homeDir);
@@ -940,7 +979,7 @@ key = "${titleOAuthRef.key}"
     }
   });
 
-  it('cascades removeProvider into the secondary_model pool', async () => {
+  it('leaves the secondary_model pool untouched on removeProvider', async () => {
     const { harness } = await makeHarness();
     try {
       await harness.setConfig({
@@ -958,24 +997,30 @@ key = "${titleOAuthRef.key}"
         },
       });
 
-      // Pool entries naming a removed model alias are filtered out; the
-      // surviving default keeps the section valid.
-      const filtered = await harness.removeProvider('b');
-      expect(filtered.secondaryModel).toEqual({
+      // Pool entries naming a removed model alias are kept as written; an
+      // unresolvable entry fails pool validation on the next session create.
+      const kept = await harness.removeProvider('b');
+      expect(kept.secondaryModel).toEqual({
         defaultModel: 'a/m1',
-        models: { 'a/m1': 'fast' },
+        models: { 'a/m1': 'fast', 'b/m1': 'smart' },
       });
 
-      // When the pool's default dangles the whole section is dropped — a
-      // leftover models table without its default would fail pool validation
-      // on every session create.
+      // Even a dangling default leaves the whole section in place on disk.
+      // (`setConfig` merges per domain, so the pool table is still the one
+      // written above; the default now points at the provider being removed.)
       await harness.setConfig({
-        secondaryModel: { defaultModel: 'a/m1', models: { 'a/m1': 'fast' } },
+        secondaryModel: { defaultModel: 'a/m1' },
       });
       const cleared = await harness.removeProvider('a');
-      expect(cleared.secondaryModel).toBeUndefined();
+      expect(cleared.secondaryModel).toEqual({
+        defaultModel: 'a/m1',
+        models: { 'a/m1': 'fast', 'b/m1': 'smart' },
+      });
       const reread = await harness.getConfig({ reload: true });
-      expect(reread.secondaryModel).toBeUndefined();
+      expect(reread.secondaryModel).toEqual({
+        defaultModel: 'a/m1',
+        models: { 'a/m1': 'fast', 'b/m1': 'smart' },
+      });
     } finally {
       await harness.close();
     }
@@ -1059,8 +1104,8 @@ key = "${titleOAuthRef.key}"
       const handle = getLiveSessionById(client.engineAccessor, 'ses_todos');
       expect(handle).toBeDefined();
       const manager = handle!.accessor.get(IAgentLifecycleService);
-      const main = await manager.create({ agentId: 'main' });
-      const todo = manager.resolve(main, AgentTodo);
+      await manager.create({ agentId: 'main' });
+      const todo = manager.handleOf('main')!.accessor.get(IAgentTodoService);
       await todo.replace([
         { title: 'write tests', status: 'in_progress' },
         { title: 'ship it', status: 'pending' },
@@ -1103,8 +1148,8 @@ key = "${titleOAuthRef.key}"
       };
 
       await client.setTowerMode({ sessionId: 'ses_tower', enabled: true });
-      // The tower feature is flag-gated engine-side, so enter() may be a
-      // no-op; the wire must always mirror the engine truth.
+      // A refused enter() rejects with a typed reason, so a resolved call
+      // means the engine activated tower mode; the wire mirrors it.
       expect((await client.getStatus({ sessionId: 'ses_tower' })).towerMode).toBe(
         mainTower().isActive,
       );
@@ -1123,6 +1168,7 @@ key = "${titleOAuthRef.key}"
   });
 
   it('rejects setTowerMode when the tower feature is unavailable', async () => {
+    vi.stubEnv('KIMI_CODE_EXPERIMENTAL_TOWER', '0');
     vi.stubEnv('KIMI_CODE_EXPERIMENTAL_FLAG', '0');
     const homeDir = await mkdtemp(join(tmpdir(), 'kimi-sdk-v2-'));
     tempDirs.push(homeDir);
@@ -1133,7 +1179,10 @@ key = "${titleOAuthRef.key}"
       await client.createSession({ id: 'ses_tower_off', workDir });
 
       await expect(client.setTowerMode({ sessionId: 'ses_tower_off', enabled: true }))
-        .rejects.toMatchObject({ code: 'session.tower_mode_invalid' });
+        .rejects.toMatchObject({
+          code: 'session.tower_mode_invalid',
+          message: expect.stringContaining('the tower experiment is disabled'),
+        });
       expect((await client.getStatus({ sessionId: 'ses_tower_off' })).towerMode).toBe(false);
 
       await client.setTowerMode({ sessionId: 'ses_tower_off', enabled: false });
@@ -1362,6 +1411,81 @@ describe('SDKRpcClientV2 engine telemetry', () => {
       await harness.close();
     }
   });
+
+  it('emits session_started once per open, with the harness schema and enabled experimental flags', async () => {
+    const homeDir = await mkdtemp(join(tmpdir(), 'kimi-sdk-v2-tel-flags-'));
+    tempDirs.push(homeDir);
+    const workDir = await mkdtemp(join(tmpdir(), 'kimi-sdk-v2-tel-flags-work-'));
+    tempDirs.push(workDir);
+    await writeFile(join(homeDir, 'config.toml'), '[experimental]\nsubagent_fork = true\n', 'utf-8');
+    const records: TelemetryRecord[] = [];
+    const harness = createKimiHarnessV2({
+      homeDir,
+      identity: TEST_IDENTITY,
+      telemetry: recordingTelemetry(records),
+    });
+    try {
+      const session = await harness.createSession({ workDir });
+      // The harness row is the sole producer: the forwarding appender drops
+      // the engine's own session_started, or every open would double-count.
+      const started = records.filter((record) => record.event === 'session_started');
+      expect(started).toHaveLength(1);
+      expect(started[0]).toMatchObject({
+        sessionId: session.id,
+        properties: {
+          client_name: 'kimi-code-cli',
+          client_version: '0.0.0-test',
+          ui_mode: 'shell',
+          resumed: false,
+        },
+      });
+      for (const record of started) {
+        const flags = String(record.properties?.['experimental_flags'] ?? '').split(',');
+        expect(flags).toContain('subagent_fork');
+        expect(flags).toContain('wait_for');
+      }
+      await session.close();
+      await harness.resumeSession({ id: session.id });
+      const afterResume = records.filter((record) => record.event === 'session_started');
+      expect(afterResume).toHaveLength(2);
+      expect(afterResume[1]).toMatchObject({
+        sessionId: session.id,
+        properties: { resumed: true },
+      });
+      const distinct = new Set(afterResume.map((record) => record.properties?.['experimental_flags']));
+      expect(distinct.size).toBe(1);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it('keeps forwarding the engine session_started to a direct SDKRpcClientV2 consumer', async () => {
+    const homeDir = await mkdtemp(join(tmpdir(), 'kimi-sdk-v2-tel-direct-'));
+    tempDirs.push(homeDir);
+    const workDir = await mkdtemp(join(tmpdir(), 'kimi-sdk-v2-tel-direct-work-'));
+    tempDirs.push(workDir);
+    const records: TelemetryRecord[] = [];
+    const client = new SDKRpcClientV2({
+      homeDir,
+      identity: TEST_IDENTITY,
+      telemetry: recordingTelemetry(records),
+    });
+    try {
+      // No harness wraps this client, so nothing else emits session_started —
+      // the engine's own row must survive forwarding.
+      const summary = await client.createSession({ workDir });
+      const started = records.filter((record) => record.event === 'session_started');
+      expect(started).toHaveLength(1);
+      expect(started[0]).toMatchObject({ properties: { resumed: false } });
+      await client.closeSession({ sessionId: summary.id });
+      await client.resumeSession({ id: summary.id });
+      const afterResume = records.filter((record) => record.event === 'session_started');
+      expect(afterResume).toHaveLength(2);
+      expect(afterResume[1]).toMatchObject({ properties: { resumed: true } });
+    } finally {
+      await client.close();
+    }
+  });
 });
 
 describe('removeProviderFromConfig', () => {
@@ -1414,7 +1538,7 @@ describe('removeProviderFromConfig', () => {
     expect(next.defaultProvider).toBe('a');
   });
 
-  it('filters secondary_model pool entries whose model alias was removed', () => {
+  it('leaves secondary_model pool entries alone when their model alias was removed', () => {
     const config = {
       providers: { a: { type: 'openai' }, b: { type: 'openai' } },
       models: {
@@ -1431,11 +1555,11 @@ describe('removeProviderFromConfig', () => {
 
     expect(next.secondaryModel).toEqual({
       defaultModel: 'a/m1',
-      models: { 'a/m1': 'fast' },
+      models: { 'a/m1': 'fast', 'b/m1': 'smart' },
     });
   });
 
-  it('drops the secondary_model section when its default model dangles', () => {
+  it('keeps the secondary_model section even when its default model dangles', () => {
     const config = {
       providers: { a: { type: 'openai' }, b: { type: 'openai' } },
       models: {
@@ -1448,15 +1572,20 @@ describe('removeProviderFromConfig', () => {
       },
     } as unknown as KimiConfig;
 
-    expect(removeProviderFromConfig(config, 'b').secondaryModel).toBeUndefined();
+    expect(removeProviderFromConfig(config, 'b').secondaryModel).toEqual({
+      defaultModel: 'b/m1',
+      models: { 'a/m1': 'fast', 'b/m1': 'smart' },
+    });
 
-    // The legacy recipe's `model` key acts as the default fallback and
-    // cascades the same way.
+    // The legacy recipe's `model` key is left alone the same way.
     const legacy = {
       ...config,
       secondaryModel: { model: 'b/m1', default_effort: 'low' },
     } as unknown as KimiConfig;
-    expect(removeProviderFromConfig(legacy, 'b').secondaryModel).toBeUndefined();
+    expect(removeProviderFromConfig(legacy, 'b').secondaryModel).toEqual({
+      model: 'b/m1',
+      default_effort: 'low',
+    });
   });
 
   it('leaves the secondary_model section untouched when nothing dangles', () => {

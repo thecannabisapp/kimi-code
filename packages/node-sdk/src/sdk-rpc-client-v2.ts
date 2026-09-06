@@ -16,6 +16,9 @@
  * - `listWorkspaceSkills` → not covered by the klient facade, so it goes
  *   through the `engineAccessor` escape hatch (the workspace handler's
  *   `IWorkspaceSkillCatalog`) instead.
+ * - `suggestFiles` → same escape hatch (the workspace handler's
+ *   `IWorkspaceFsService`); the v1 client inherits the base's `undefined`
+ *   (capability absent).
  * - `getConfig` / `setConfig` / `removeProvider` / `getConfigDiagnostics` →
  *   `klient.global.config.*`, with the v1 `KimiConfig` shape restored by the
  *   pure mapping layer in `src/v2/config-mapper.ts`.
@@ -58,15 +61,14 @@
  * - `prompt` / `steer` / `runShellCommand` / `cancelShellCommand` → the
  *   `klient.session(id).agent(id)` facade; `activatePluginCommand` →
  *   `IAgentPluginCommandService` through the agent scope; `activateSkill` →
- *   `IAgentSkillService` through the agent scope (the engine settles
+ *   the main agent's `IAgentSkillService` (the engine settles
  *   `{turn_id}` and applies v1's main-only metadata update itself);
  *   `generateAgentsMd` →
  *   `ISessionInitService` through the session scope; `getSessionWarnings` →
  *   rebuilt over the profile's cached AGENTS.md warning plus the engine's
  *   `prepareSystemPromptContext` (no v2 aggregate service exists).
  * - `createGoal` / `getGoal` / `pauseGoal` / `resumeGoal` / `cancelGoal` →
- *   the `AgentGoal` runtime facade resolved through the session's agent
- *   lifecycle service; `getCronTasks` →
+ *   the target agent scope's `IAgentGoalService`; `getCronTasks` →
  *   with the v1 snapshot
  *   shape restored; `listBackgroundTasks` / `getBackgroundTaskOutput` → the
  *   `klient.session(id).agent(id)` facade; `stopBackgroundTask` /
@@ -151,6 +153,7 @@ import {
 import { encodeWorkDirKey } from '@moonshot-ai/agent-core-v2/_base/utils/workdir-slug';
 import { McpConnectionManager } from '@moonshot-ai/agent-core-v2/mcpCore/connection-manager';
 import { loadMcpServers } from '@moonshot-ai/agent-core-v2/app/mcpConfig/configLoader';
+import { fsSuggestRequestSchema } from '@moonshot-ai/agent-core-v2/workspace/workspaceFs/fs';
 import { IAppendLogStore } from '@moonshot-ai/agent-core-v2/persistence/interface/appendLogStore';
 import type { McpServerConfig as WorkspaceMcpServerConfig } from '@moonshot-ai/agent-core-v2/mcpCore/config-schema';
 import {
@@ -164,12 +167,11 @@ import {
   ensureMainAgent,
   agentContextOf,
   IAgentActivityView,
-  IAgentContextInjectorService,
   IAgentContextMemoryService,
-  AgentCron,
-  AgentGoal,
   IAgentConversationUndoService,
+  IAgentCronService,
   IAgentFullCompactionService,
+  IAgentGoalService,
   IAgentPluginService,
   IAgentLifecycleService,
   IAgentLoopService,
@@ -177,6 +179,7 @@ import {
   IAgentPermissionRulesService,
   IAgentPluginCommandService,
   IAgentProfileService,
+  IAgentReminderService,
   IAgentSkillService,
   IAgentSwarmService,
   IAgentTaskService,
@@ -187,6 +190,7 @@ import {
   IBootstrapService,
   IConfigService,
   IEventService,
+  IFlagService,
   IHostEnvironment,
   IHostFileSystem,
   IMcpManagementService,
@@ -203,7 +207,7 @@ import {
   ISessionMcpHandle,
   ISessionMetadata,
   ISessionSkillCatalog,
-  AgentTodo,
+  IAgentTodoService,
   ISessionWorkspaceContext,
   ITelemetryService,
   IWorkspaceAliases,
@@ -232,6 +236,7 @@ import {
   resolveLoggingConfig,
   resolvePrintBackgroundMode,
   summarizeSkill,
+  towerEnterFailureMessage,
   type IAgentScopeHandle,
   type IDisposable,
   type ISessionScopeHandle,
@@ -317,6 +322,8 @@ import type {
   SessionTodoItem,
   SessionUsage,
   SkillSummary,
+  SuggestFilesInput,
+  SuggestFilesResult,
   TelemetryClient,
   UploadFileOptions,
   WorkspaceTrustInfo,
@@ -549,19 +556,58 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
    * Forward engine telemetry to the host-supplied client. Without this the
    * client only served `KimiHarness`-level events and every engine-side event
    * (`track2` facts from agent/session scopes) was dropped on the v2 route.
-   * The `ITelemetryAppender` shape is a structural superset of the v1
-   * `TelemetryClient`, so the client installs directly. The `telemetry`
-   * config section gates engine events the same way the v2 print runner
-   * gates them; the host keeps owning the client's lifecycle (flush /
-   * shutdown stay with the host, matching the v1 core's arrangement).
+   * The v1 `TelemetryClient` is wrapped into the engine appender record shape
+   * (event + ambient context + final properties). The `telemetry` config
+   * section gates engine events the same way the v2 print runner gates them;
+   * the host keeps owning the client's lifecycle (flush / shutdown stay with
+   * the host, matching the v1 core's arrangement).
+   *
+   * The engine's own `session_started` is forwarded unless
+   * {@link suppressEngineSessionStarted} was called — see its doc for why the
+   * harness-assembled client drops that row.
    */
   private installEngineTelemetry(client: TelemetryClient | undefined): void {
     if (client === undefined) return;
     const telemetry = this.app.accessor.get(ITelemetryService);
-    telemetry.setAppender(client);
+    telemetry.addAppender({
+      track: (record) => {
+        if (this.engineSessionStartedSuppressed && record.event === 'session_started') return;
+        client.track(record.event, record.properties);
+      },
+    });
     void this.configReady.then(() => {
       telemetry.setEnabled(this.engineAccessor.get(IConfigService).get('telemetry') !== false);
     });
+  }
+
+  private engineSessionStartedSuppressed = false;
+
+  /**
+   * Drop the engine's own `session_started` from telemetry forwarding. Called
+   * by `createKimiHarnessV2` at assembly time: the harness emits that event
+   * for every session it opens (create / resume / reload / fork) with the
+   * richer client-attribution schema, so the engine's
+   * `{resumed, experimental_flags}` copy would double-count every open.
+   * Direct `SDKRpcClientV2` consumers never call this and keep the engine row
+   * — it is their only `session_started` producer. Hosts without a harness
+   * (run-v2-print, kap-server) wire their own appenders and are unaffected
+   * either way.
+   */
+  suppressEngineSessionStarted(): void {
+    this.engineSessionStartedSuppressed = true;
+  }
+
+  /**
+   * Exposed experimental flag ids in the `session_started` wire shape (sorted,
+   * comma-joined), read live from the in-process engine's flag service. The
+   * harness-side `session_started` row merges this so both producers of the
+   * event carry the same flag dimension. Exposure is the flag system's own
+   * notion (`IFlagService.exposedIds`): a flag that is enabled but not yet
+   * active in this process (e.g. its feature assembles at App construction)
+   * does not count.
+   */
+  enabledExperimentalFlags(): string {
+    return this.engineAccessor.get(IFlagService).exposedIds().toSorted().join(',');
   }
 
   /**
@@ -624,6 +670,42 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
     const catalog = handler.program.skills;
     await catalog.ready;
     return catalog.catalog.listSkills().map(summarizeSkill);
+  }
+
+  /**
+   * Through the workspace handler's `IWorkspaceFsService` — the same engine
+   * suggest the kap-server `fs:suggest` routes serve (fuzzy scoring,
+   * directories included, gitignore respected), so in-process hosts match
+   * the web client's @ mention results.
+   */
+  override async suggestFiles(workDir: string, input: SuggestFilesInput): Promise<SuggestFilesResult | undefined> {
+    const parsed = fsSuggestRequestSchema.safeParse({
+      query: input.query,
+      limit: input.limit ?? 50,
+      follow_gitignore: true,
+      show_hidden: false,
+    });
+    if (!parsed.success) {
+      const issue = parsed.error.issues[0];
+      const where = issue !== undefined && issue.path.length > 0 ? `${String(issue.path[0])}: ` : '';
+      throw new KimiError(
+        ErrorCodes.REQUEST_INVALID,
+        `suggestFiles ${where}${issue?.message ?? 'invalid input'}`,
+      );
+    }
+    const handler = await this.engineAccessor
+      .get(IWorkspaceInstanceManager)
+      .getOrCreate({ root: normalizeRequiredWorkDir('suggestFiles', workDir) });
+    const result = await handler.program.fs.suggest(parsed.data);
+    return {
+      items: result.items.map((item) => ({
+        path: item.path,
+        name: item.name,
+        kind: item.kind,
+        matchPositions: item.match_positions,
+      })),
+      truncated: result.truncated,
+    };
   }
 
   /**
@@ -709,30 +791,30 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
 
   /**
    * v1's removal cascades: the provider entry, every model pointing at it,
-   * the default pointers when they dangle, and the `[secondary_model]`
-   * subagent pool entries (the section itself when its default dangles).
-   * The engine's own `kosong.removeProvider` only clears the
-   * default-provider pointer, so the full v1 cascade is computed from the
-   * user-layer values (see `planProviderRemoval`) and persisted as ONE
-   * atomic multi-section replace — the same single-write shape as v1's
-   * `removeKimiProvider`, so a process exit can never leave the file in a
-   * halfway-cascaded state.
+   * and the default pointers when they dangle. The engine's own
+   * `kosong.removeProvider` only clears the default-provider pointer, so the
+   * full v1 cascade is computed from the user-layer values (see
+   * `planProviderRemoval`) and persisted as ONE atomic multi-section
+   * replace — the same single-write shape as v1's `removeKimiProvider`, so a
+   * process exit can never leave the file in a halfway-cascaded state. The
+   * `[secondary_model]` section is left alone on purpose: an entry whose
+   * model no longer resolves fails pool validation on the next session
+   * create, surfacing a named error instead of silently rewriting the
+   * user's configuration.
    */
   override async removeProvider(providerId: string): Promise<KimiConfig> {
     await this.configReady;
-    const [providers, models, defaultModel, defaultProvider, secondaryModel] = await Promise.all([
+    const [providers, models, defaultModel, defaultProvider] = await Promise.all([
       this.klient.global.config.inspect<Record<string, unknown>>('providers'),
       this.klient.global.config.inspect<Record<string, Record<string, unknown>>>('models'),
       this.klient.global.config.inspect<string>('defaultModel'),
       this.klient.global.config.inspect<string>('defaultProvider'),
-      this.klient.global.config.inspect<Record<string, unknown>>('secondaryModel'),
     ]);
     const plan = planProviderRemoval({
       providers: providers.userValue,
       models: models.userValue,
       defaultModel: defaultModel.userValue,
       defaultProvider: defaultProvider.userValue,
-      secondaryModel: secondaryModel.userValue,
       providerId,
     });
     const sections: Record<string, unknown> = {
@@ -744,11 +826,6 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
     }
     if (plan.clearDefaultProvider) {
       sections['defaultProvider'] = undefined;
-    }
-    if (plan.secondaryModel !== undefined) {
-      // `null` clears the whole section; a replacement object folds the
-      // filtered pool into the same atomic write.
-      sections['secondaryModel'] = plan.secondaryModel ?? undefined;
     }
     await this.klient.global.config.replaceSections({ sections });
     return this.getConfig();
@@ -1163,6 +1240,7 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
       const page = await this.listSessionsPage({
         workDir: input.workDir,
         sessionId: input.sessionId,
+        includeArchived: input.includeArchived,
         before,
       });
       all.push(...page.items);
@@ -1192,6 +1270,7 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
       const page = await this.klient.global.sessions.list({
         workspaceIds,
         sessionId: input.sessionId,
+        includeArchived: input.includeArchived,
         limit: remaining,
         before,
       });
@@ -1365,13 +1444,15 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
       async () => {
         const program = await programForSession(this.engineAccessor, input.id);
         if (program === undefined) throw SDKRpcClientV2.sessionNotFound(input.id);
-        const handle = await this.engineAccessor.get(ISessionManager).fork({
+        const meta = await this.engineAccessor.get(ISessionManager).fork({
           sourceSessionId: input.id,
           newSessionId: input.forkId,
           title: input.title,
           metadata: input.metadata,
           turnIndex: input.turnIndex,
         });
+        const handle = await resumeSessionById(this.engineAccessor, meta.id);
+        if (handle === undefined) throw SDKRpcClientV2.sessionNotFound(meta.id);
         this.wireSession(handle);
         return this.resumedSessionSummary(handle);
       },
@@ -1838,9 +1919,9 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
   override async getTodos(input: SessionIdRpcInput): Promise<readonly SessionTodoItem[]> {
     const session = this.requireLiveSession(input.sessionId);
     const agents = session.accessor.get(IAgentLifecycleService);
-    const main = agents.get(MAIN_AGENT_ID);
+    const main = agents.handleOf(MAIN_AGENT_ID);
     if (main === undefined) return [];
-    const todos = agents.resolve(main, AgentTodo).get();
+    const todos = main.accessor.get(IAgentTodoService).get();
     return todos.map((todo) => ({ title: todo.title, status: todo.status }));
   }
 
@@ -1969,7 +2050,7 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
   }
 
   /**
-   * Through the agent scope (`IAgentSkillService.activate`) — the direct call
+   * Through the target agent's `IAgentSkillService` — the direct call
    * keeps v1's semantics: validate first (`skill.not_found` /
    * `skill.type_unsupported` reject synchronously), then render the skill
    * prompt and launch a turn with it. The engine updates title/lastPrompt for
@@ -1980,7 +2061,9 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
    */
   override async activateSkill(input: ActivateSkillRpcInput): Promise<void> {
     const agent = await this.agentScope(input.sessionId);
-    await agent.accessor.get(IAgentSkillService).activate({ name: input.name, args: input.args });
+    await agent.accessor
+      .get(IAgentSkillService)
+      .activate({ name: input.name, args: input.args });
   }
 
   /**
@@ -2084,7 +2167,7 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
     } else {
       swarm.exit();
     }
-    await agent.accessor.get(IAgentContextInjectorService).reconcileWhenIdle('swarm_mode');
+    await agent.accessor.get(IAgentReminderService).reconcileWhenIdle('swarm_mode');
   }
 
   /** v1's `swarm()` composition: enter with the one-shot `task` trigger, then prompt. */
@@ -2098,17 +2181,17 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
     const agent = await this.agentScope(input.sessionId);
     const tower = agent.accessor.get(IAgentTowerService);
     if (input.enabled) {
-      await tower.enter();
-      if (!tower.isActive) {
+      const result = await tower.enter(input.base);
+      if (!result.entered) {
         throw new V2Error2(
           V2ErrorCodes.SESSION_TOWER_MODE_INVALID,
-          'tower mode could not be enabled — the tower feature is unavailable in this process, or another live session owns the workspace tower',
+          towerEnterFailureMessage(result),
         );
       }
     } else {
       tower.exit();
     }
-    await agent.accessor.get(IAgentContextInjectorService).reconcileWhenIdle('tower_mode');
+    await agent.accessor.get(IAgentReminderService).reconcileWhenIdle('tower_mode');
   }
 
   // -----------------------------------------------------------------------
@@ -2125,8 +2208,7 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
   // -----------------------------------------------------------------------
 
   /**
-   * Through the `AgentGoal` runtime facade resolved from the session's agent
-   * lifecycle service — no klient
+   * Through the target agent scope's `IAgentGoalService` — no klient
    * facade exists for the goal domain. Gap: v2 rejects every goal command on
    * a non-main agent (`goal.unsupported_agent`) where v1 keeps a `GoalMode`
    * on every agent; only reachable through a non-main `interactiveAgentId`
@@ -2134,48 +2216,35 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
    */
   override async createGoal(input: SessionIdRpcInput & CreateGoalInput): Promise<GoalSnapshot> {
     const agent = await this.agentScope(input.sessionId);
-    return this.requireLiveSession(input.sessionId)
-      .accessor.get(IAgentLifecycleService)
-      .resolve(agentContextOf(agent), AgentGoal)
+    return agent.accessor
+      .get(IAgentGoalService)
       .createGoal({ objective: input.objective, replace: input.replace });
   }
 
   override async getGoal(input: SessionIdRpcInput): Promise<GoalToolResult> {
     const agent = await this.agentScope(input.sessionId);
-    return this.requireLiveSession(input.sessionId)
-      .accessor.get(IAgentLifecycleService)
-      .resolve(agentContextOf(agent), AgentGoal)
-      .getGoal();
+    return agent.accessor.get(IAgentGoalService).getGoal();
   }
 
   override async pauseGoal(input: SessionIdRpcInput): Promise<GoalSnapshot> {
     const agent = await this.agentScope(input.sessionId);
-    return this.requireLiveSession(input.sessionId)
-      .accessor.get(IAgentLifecycleService)
-      .resolve(agentContextOf(agent), AgentGoal)
-      .pauseGoal();
+    return agent.accessor.get(IAgentGoalService).pauseGoal();
   }
 
   override async resumeGoal(input: SessionIdRpcInput): Promise<GoalSnapshot> {
     const agent = await this.agentScope(input.sessionId);
-    return this.requireLiveSession(input.sessionId)
-      .accessor.get(IAgentLifecycleService)
-      .resolve(agentContextOf(agent), AgentGoal)
-      .resumeGoal();
+    return agent.accessor.get(IAgentGoalService).resumeGoal();
   }
 
   override async cancelGoal(input: SessionIdRpcInput): Promise<GoalSnapshot> {
     const agent = await this.agentScope(input.sessionId);
-    return this.requireLiveSession(input.sessionId)
-      .accessor.get(IAgentLifecycleService)
-      .resolve(agentContextOf(agent), AgentGoal)
-      .cancelGoal();
+    return agent.accessor.get(IAgentGoalService).cancelGoal();
   }
 
   /**
-   * Through the main agent's `AgentCron` runtime facade — no klient facade
+   * Through the main agent's `IAgentCronService` — no klient facade
    * exists for cron. v1's cron manager is per-agent: the main agent's
-   * manager is what the v2 cron runtime ports (it borrows the main
+   * manager is what the v2 cron service ports (it borrows the main
    * agent to steer fires), and a v1 subagent reports `[]` (`cron` is null) —
    * mirrored here for a non-main `interactiveAgentId`. The v1 snapshot shape
    * is restored field-by-field: `recurring` defaults to true, and the
@@ -2185,10 +2254,10 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
   override async getCronTasks(input: SessionIdRpcInput): Promise<GetCronTasksResult> {
     await this.agentScope(input.sessionId);
     if (this.interactiveAgentId !== MAIN_AGENT_ID) return { tasks: [] };
-    const manager = this.requireLiveSession(input.sessionId).accessor.get(IAgentLifecycleService);
-    const mainContext = manager.get(MAIN_AGENT_ID);
-    if (mainContext === undefined) return { tasks: [] };
-    const cron = manager.resolve(mainContext, AgentCron);
+    const session = this.requireLiveSession(input.sessionId);
+    const main = session.accessor.get(IAgentLifecycleService).handleOf(MAIN_AGENT_ID);
+    if (main === undefined) return { tasks: [] };
+    const cron = main.accessor.get(IAgentCronService);
     return {
       tasks: cron.list().map((task) => ({
         id: task.id,
@@ -2680,6 +2749,11 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
 
 export function createKimiHarnessV2(options: KimiHarnessOptions): KimiHarness {
   const rpc = new SDKRpcClientV2(options);
+  // The harness below emits session_started for every session it opens with
+  // the richer client-attribution schema; drop the engine's thinner copy from
+  // forwarding so each open is counted once. Direct SDKRpcClientV2 consumers
+  // keep the engine row.
+  rpc.suppressEngineSessionStarted();
   return new KimiHarness(rpc, {
     identity: rpc.identity,
     uiMode: options.uiMode,
@@ -2693,6 +2767,9 @@ export function createKimiHarnessV2(options: KimiHarnessOptions): KimiHarness {
     // ingestion falls back to env / built-in defaults like daemon-client hosts.
     imageLimits: undefined,
     sessionStartedProperties: options.sessionStartedProperties,
+    sessionStartedDynamicProperties: () => ({
+      experimental_flags: rpc.enabledExperimentalFlags(),
+    }),
   });
 }
 

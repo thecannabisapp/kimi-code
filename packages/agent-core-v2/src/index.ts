@@ -39,6 +39,7 @@ export * from '#/runtime/runtimeWorkspaceView';
 export * from '#/runtime/runtimeProvider';
 export * from '#/runtime/runtimeUnitHost';
 export * from '#/runtime/localRuntime';
+export * from '#/runtime/standaloneRuntime';
 export * from '#/program/program';
 export * from '#/workspace/workspaceInstance/workspaceInstance';
 export * from '#/workspace/workspaceInstance/workspaceInstanceManager';
@@ -60,10 +61,9 @@ export * from '#/wire/record';
 export * from '#/wire/migration/migration';
 export * from '#/session/sessionLog/sessionLogService';
 export * from '#/app/telemetry/telemetry';
+export * from '#/app/telemetry/context';
 export * from '#/app/telemetry/events';
 export * from '#/app/telemetry/telemetryService';
-export * from '#/app/telemetry/agentTelemetryContext';
-export * from '#/app/telemetry/agentTelemetryContextService';
 export * from '#/app/telemetry/consoleAppender';
 export * from '#/app/telemetry/cloudAppender';
 export * from '#/app/bootstrap/bootstrap';
@@ -109,21 +109,6 @@ export * from '#/state/errors';
 export * from '#/state/state';
 export * from '#/state/stateContribution';
 export * from '#/state/agentModel';
-export {
-  AgentRuntimeContributionPoint,
-  AgentRuntimeOverrideContributionPoint,
-  defineAgentRuntimeContract,
-  defineAgentRuntimeProvider,
-} from '#/agent/runtime/agentRuntime';
-export type {
-  AgentRuntimeContributionSnapshot,
-  AgentRuntimeDefinition,
-  AgentRuntimeIdentity,
-  AgentRuntimeProvider,
-  AgentRuntimeSnapshot,
-  AgentRuntimeStatus,
-  RuntimeOf,
-} from '#/agent/runtime/agentRuntime';
 export * from '#/state/eventDispatcher';
 import '#/state/eventDispatcherService';
 export * from '#/_base/state/stateRegistry';
@@ -177,7 +162,8 @@ export * from '#/kosong/provider/provider';
 export * from '#/kosong/provider/providerService';
 export * from '#/kosong/provider/providerDefinition';
 export * from '#/kosong/provider/protocolAdapterRegistry';
-import '#/app/skillCatalog/configSection';
+import '#/features/skill/catalog/configSection';
+import '#/app/remoteControl/flag';
 import '#/app/agentIdentity/configSection';
 export * from '#/app/agentIdentity/configSection';
 export * from '#/app/agentIdentity/agentIdentity';
@@ -270,26 +256,26 @@ export * from '#/debug/index';
 export * from '#/workspace/workspaceAgentProfileLoader/pluginAgentProfileLoader';
 export * from '#/workspace/workspaceAgentProfileLoader/pluginAgentProfileLoaderService';
 
-export type { SkillSource } from '#/app/skillCatalog/types';
-export * from '#/agent/tools/skill/skill';
-import '#/agent/tools/skill/skillTool';
-export * from '#/agent/skill/skill';
-export * from '#/agent/skill/skillService';
-export * from '#/app/skillCatalog/types';
-export * from '#/app/skillCatalog/configSection';
-export * from '#/app/skillCatalog/parser';
-export * from '#/app/skillCatalog/registry';
-export * from '#/app/skillCatalog/errors';
-export * from '#/app/skillCatalog/skillDiscovery';
-export * from '#/app/skillCatalog/inMemorySkillDiscovery';
-export * from '#/app/skillCatalog/skillSource';
-export * from '#/app/skillCatalog/skillRoots';
-export * from '#/app/skillCatalog/builtin/builtin';
-export * from '#/app/skillCatalog/builtinSkillSource';
-export * from '#/app/skillCatalog/userFileSkillSource';
-export * from '#/session/sessionSkillCatalog/skillCatalog';
-export * from '#/session/sessionSkillCatalog/skillCatalogData';
-export * from '#/session/sessionSkillCatalog/skillCatalogService';
+export type { SkillSource } from '#/features/skill/catalog/types';
+export * from '#/features/skill/tools/skill';
+export * from '#/features/skill/skill';
+export * from '#/features/skill/skillService';
+import '#/features/skill/skillFeature';
+export * from '#/features/skill/catalog/types';
+export * from '#/features/skill/catalog/configSection';
+export * from '#/features/skill/catalog/parser';
+export * from '#/features/skill/catalog/registry';
+export * from '#/features/skill/catalog/errors';
+export * from '#/features/skill/catalog/skillDiscovery';
+export * from '#/features/skill/catalog/inMemorySkillDiscovery';
+export * from '#/features/skill/catalog/skillSource';
+export * from '#/features/skill/catalog/skillRoots';
+export * from '#/features/skill/catalog/builtin/builtin';
+export * from '#/features/skill/catalog/builtinSkillSource';
+export * from '#/features/skill/catalog/userFileSkillSource';
+export * from '#/features/skill/session/skillCatalog';
+export * from '#/features/skill/session/skillCatalogData';
+export * from '#/features/skill/session/skillCatalogService';
 export * from '#/session/sessionAgentProfileCatalog/sessionAgentProfileCatalog';
 export * from '#/session/sessionAgentProfileCatalog/agentProfileCatalogSeed';
 export * from '#/session/sessionAgentProfileCatalog/sessionAgentProfileCatalogService';
@@ -297,12 +283,12 @@ export * from '#/session/sessionInstructions/instructionsProvider';
 export * from '#/session/workspaceInfo/workspaceInfo';
 export * from '#/workspace/workspaceDirs/workspaceDirs';
 export * from '#/workspace/workspaceDirs/workspaceDirsService';
-export * from '#/workspace/workspaceSkillCatalog/workspaceSkillCatalog';
-export * from '#/workspace/workspaceSkillCatalog/workspaceSkillCatalogService';
-export * from '#/workspace/workspaceSkillCatalog/extraFileSkillSource';
-export * from '#/workspace/workspaceSkillCatalog/explicitFileSkillSource';
-export * from '#/workspace/workspaceSkillCatalog/rootFileSkillSource';
-export * from '#/workspace/workspaceSkillCatalog/pluginSkillSource';
+export * from '#/features/skill/workspace/workspaceSkillCatalog';
+export * from '#/features/skill/workspace/workspaceSkillCatalogService';
+export * from '#/features/skill/workspace/extraFileSkillSource';
+export * from '#/features/skill/workspace/explicitFileSkillSource';
+export * from '#/features/skill/workspace/rootFileSkillSource';
+export * from '#/features/skill/workspace/pluginSkillSource';
 export * from '#/workspace/workspaceAgentProfileLoader/workspaceAgentProfileLoader';
 export * from '#/workspace/workspaceAgentProfileLoader/workspaceAgentProfileLoaderService';
 export * from '#/workspace/workspaceAgentProfileLoader/extraAgentProfileLoader';
@@ -326,6 +312,8 @@ export * from '#/app/flag/flagService';
 
 export * from '#/agent/activityView/activityView';
 import '#/agent/activityView/activityViewService';
+export * from '#/agent/modeMutex/modeMutex';
+import '#/agent/modeMutex/modeMutexService';
 export * from '#/features/btw/btw';
 export * from '#/features/btw/btwService';
 import '#/features/btw/btwFeature';
@@ -338,7 +326,12 @@ export * from '#/features/plan/configSection';
 export * from '#/features/plan/plan';
 export * from '#/features/plan/planOps';
 export * from '#/features/plan/planService';
+import '#/features/dateChange/dateChangeFeature';
 import '#/features/plan/planFeature';
+export * from '#/features/fileHistory/fileHistory';
+export * from '#/features/fileHistory/fileHistoryOps';
+export * from '#/features/fileHistory/fileHistoryService';
+import '#/features/fileHistory/fileHistoryFeature';
 export * from '#/features/externalHooks/configSection';
 export * from '#/features/externalHooks/app/externalHooksRunner';
 export * from '#/features/externalHooks/app/externalHooksRunnerService';
@@ -350,6 +343,7 @@ import '#/features/externalHooks/externalHooksFeature';
 export * from '#/features/debugEvents/debugEvents';
 export * from '#/features/debugEvents/debugEventsService';
 import '#/features/debugEvents/debugEventsFeature';
+export * from '#/features/swarm/configSection';
 export * from '#/features/swarm/agent/swarm';
 export * from '#/features/swarm/agent/swarmService';
 export * from '#/features/swarm/session/sessionSwarm';
@@ -367,11 +361,11 @@ export * from '#/features/goal/tools/update-goal/update-goal';
 import '#/features/goal/tools/update-goal/updateGoalTool';
 export * from '#/features/goal/goalDeadlineScheduler';
 export * from '#/features/goal/goal';
-export * from '#/features/goal/goalAgentRuntime';
+export * from '#/features/goal/goalService';
 export * from '#/features/goal/goalOps';
 export * from '#/features/goal/types';
 import '#/features/goal/goalFeature';
-import '#/features/staleGuard/staleGuardFeature';
+export * from '#/features/tower/flag';
 export * from '#/features/tower/tower';
 export * from '#/features/tower/towerFeature';
 export * from '#/features/tower/towerService';
@@ -439,7 +433,7 @@ export * from '#/agent/task/taskService';
 import '#/features/cron/configSection';
 export * from '#/features/cron/cronTask';
 export * from '#/features/cron/configSection';
-export * from '#/features/cron/cronAgentRuntime';
+export * from '#/features/cron/cronService';
 export * from '#/features/cron/cronOps';
 import '#/features/cron/cronFeature';
 export * from '#/features/cron/tools/cron-create/cron-create';
@@ -498,8 +492,8 @@ export * from '#/app/sessionExport/zip';
 export * from '#/app/sessionLegacy/sessionLegacy';
 export * from '#/app/sessionLegacy/sessionLegacyService';
 export * from '#/features/interaction/interaction';
-export * from '#/features/interaction/interactionAgentRuntime';
 export * from '#/features/interaction/interactionOps';
+export * from '#/features/interaction/interactionService';
 export * from '#/features/interaction/sessionInteractions';
 import '#/features/interaction/interactionFeature';
 export * from '#/session/sessionContext/sessionContext';
@@ -582,11 +576,11 @@ export {
   compressImageForModel,
   gateImageFormatParts,
   IMAGE_BYTE_BUDGET,
+  MAX_IMAGE_DECODE_BYTES,
   MAX_IMAGE_EDGE_PX,
   READ_IMAGE_BYTE_BUDGET,
   resolveMaxImageEdgePx,
   resolveReadImageByteBudget,
-  type ImageCompressionTelemetry,
 } from '#/agent/media/image-compress';
 export {
   MODEL_ACCEPTED_IMAGE_MIMES,
@@ -628,11 +622,12 @@ export * from '#/agent/contextMemory/loopEventFold';
 export * from '#/agent/contextMemory/messageId';
 export * from '#/agent/contextMemory/contextTranscript';
 export * from '#/agent/contextMemory/types';
-export * from '#/agent/systemReminder/systemReminder';
-export * from '#/agent/systemReminder/systemReminderService';
+export * from '#/features/reminder/reminderService';
+export * from '#/features/reminder/systemReminder';
+export * from '#/features/reminder/types';
+import '#/features/reminder/reminderFeature';
 export * from '#/features/dateChange/dateChange';
 export * from '#/features/dateChange/dateChangeService';
-import '#/features/dateChange/dateChangeFeature';
 export * from '#/agent/contextProjector/contextProjector';
 export * from '#/agent/contextProjector/contextProjectorService';
 export * from '#/agent/contextProjector/mediaProjection';
@@ -642,8 +637,6 @@ export * from '#/session/tokenCounting/sessionTokenCounting';
 export * from '#/session/tokenCounting/tokenCountingAgentModel';
 export * from '#/session/tokenCounting/sessionTokenCountingService';
 import '#/features/tokenCounting/tokenCountingFeature';
-export * from '#/agent/contextInjector/contextInjector';
-export * from '#/agent/contextInjector/contextInjectorService';
 export * from '#/agent/plugin/agentPlugin';
 export * from '#/agent/plugin/agentPluginOps';
 export * from '#/agent/plugin/agentPluginService';
@@ -652,6 +645,11 @@ export * from '#/agent/fullCompaction/fullCompaction';
 export * from '#/agent/fullCompaction/fullCompactionService';
 export * from '#/agent/fullCompaction/compactionOps';
 export * from '#/agent/fullCompaction/types';
+export * from '#/agent/fullCompaction/contextRecovery';
+export * from '#/agent/fullCompaction/compactionInstruction';
+export * from '#/features/contextBudget/contextBudgetReminder';
+export * from '#/features/contextBudget/contextBudgetService';
+import '#/features/contextBudget/contextBudgetFeature';
 export * from '#/agent/llmRequester/llmRequester';
 export * from '#/agent/llmRequester/llmRequesterService';
 export * from '#/agent/llmRequester/llmRequestOps';
@@ -663,6 +661,7 @@ export * from '#/agent/loop/loop';
 export * from '#/agent/loop/loopService';
 export * from '#/agent/loop/loopContinuation';
 export * from '#/agent/loop/loopContinuationService';
+export * from '#/agent/loop/handoffStep';
 export * from '#/agent/interruptionReminder/interruptionReminder';
 export * from '#/agent/interruptionReminder/interruptionReminderService';
 export * from '#/agent/interruptionReminder/interruptionReminderOps';
@@ -726,7 +725,7 @@ export * from '#/features/sessionInit/profile/init';
 import '#/features/sessionInit/sessionInitFeature';
 export * from '#/features/todo/todoItem';
 export * from '#/features/todo/todoListReminder';
-export * from '#/features/todo/todoAgentRuntime';
+export * from '#/features/todo/todoService';
 export * from '#/features/todo/tools/todo-list/todo-list';
 import '#/features/todo/todoFeature';
 export * from '#/tool/toolContract';

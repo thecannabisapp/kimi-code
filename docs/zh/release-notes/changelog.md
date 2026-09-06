@@ -6,6 +6,69 @@ outline: 2
 
 本页记录 Kimi Code CLI 每个版本的变更内容。
 
+## 0.40.1（2026-09-02）
+
+### 修复
+
+- 修复 kimi-cli 迁移完成或关闭后仍重复弹出迁移提示的问题。
+
+## 0.40.0（2026-09-02）
+
+### 新功能
+
+- Web 版设置新增「插件」面板：可浏览插件市场并安装、启停、移除插件。
+- 支持在一条消息中同时激活多个技能。
+- 新增 `kimi session list` 命令，可在命令行直接列出会话。
+- Tower 模式（实验性）行为调整：agent 不再自行进入，需用 `/tower on` 或 `/tower <base-branch>` 显式开启。
+- 子代理设置（`[secondary_model]`）功能由实验性转为正式。
+- 新增危险命令护栏：Auto 模式直接拦截 shutdown、reboot、rm -rf 等危险命令，Manual 与 YOLO 模式执行前必定询问；可用 `[permission] dangerous_command_guard = false` 或 `KIMI_CODE_DANGEROUS_COMMAND_GUARD=false` 关闭。
+
+### 优化
+
+- 更新配置时完整保留 config.toml 的注释、键顺序与格式。
+- Bash 工具的 cwd 参数不再限制在工作区内。
+- 工作区信任弹窗默认选中「Trust this folder」。
+- `kimi acp` 子命令不再识别 `KIMI_CODE_LEGACY_FLAG`，始终运行在默认 agent 引擎。
+- Web 版 Diff 面板新增代码折行开关，并精简了面板头部。
+
+### 修复
+
+- 修复实验开关优先级：config.toml 中显式设为 `false` 的 `[experimental]` 条目现在稳定优先于 `KIMI_CODE_EXPERIMENTAL_FLAG` 总开关（单项 `KIMI_CODE_EXPERIMENTAL_<NAME>` 变量仍覆盖两者）。
+- 修复了一些已知问题，并做了若干细节优化。更详细的变更记录见 [GitHub](https://github.com/MoonshotAI/kimi-code/blob/main/apps/kimi-code/CHANGELOG.md)。
+
+## 0.39.1（2026-08-28）
+
+### 修复
+
+- 修复在一个会话中切换权限模式会改动所有会话的问题，权限模式现按会话独立生效。
+- 修复登录相关问题
+- 修复点击输入框占位提示后，输入法或键盘首个字符被吞的问题
+- 修复新会话中附件上传完成后仍显示"上传中"的问题
+- 修复了一些已知问题，并做了若干细节优化。更详细的变更记录见 [GitHub](https://github.com/MoonshotAI/kimi-code/blob/main/apps/kimi-code/CHANGELOG.md)。
+
+## 0.39.0（2026-08-27）
+
+### 新功能
+
+- 新增实验性远程控制功能：可远程访问本地的 web 会话，设置 `KIMI_CODE_EXPERIMENTAL_REMOTE_CONTROL=1` 后运行 `kimi rc`、`kimi web --remote-control` 或 `/remote-control` 启动。
+- 新增实验性 tower 多 Agent 编排模式：设置 `KIMI_CODE_EXPERIMENTAL_TOWER=1` 后运行 `/tower on` 和 `/tower <objective>` 启动。
+- subagent 与 swarm 工具新增可选 `fork` 参数，子 Agent 以调用方当前对话历史的快照启动；设置 `KIMI_CODE_EXPERIMENTAL_SUBAGENT_FORK=1` 或在 `config.toml` 的 `[experimental]` 下写 `subagent_fork = true` 启用。
+- web: 运行卡片新增 "转到后台" 按钮，可把正在前台运行的 Bash 命令或子 Agent 转为后台运行。
+- web: 移动端会话列表新增平铺/按工作区分组的切换标签。
+- 内置插件市场新增 Tencent CloudBase 插件，通过 `/plugins` 安装。
+- 新增 `[swarm] timeout_ms` 配置项（或环境变量 `KIMI_CODE_SWARM_TIMEOUT_MS`）。
+
+### 优化
+
+- web: 右侧边栏重构为多标签面板。
+- web: 优化输入框交互，包括文件、文件夹和媒体附件的展示。
+- web: 优化移动端 UI 样式。
+
+### 修复
+
+- 修复 Windows 上文件工具与 Shell 工作目录无法解析 Git Bash 路径（如 /c/Users、/tmp）的问题。
+- 修复了一些已知问题，并做了若干细节优化。更详细的变更记录见 [GitHub](https://github.com/MoonshotAI/kimi-code/blob/main/apps/kimi-code/CHANGELOG.md)。
+
 ## 0.38.0（2026-08-20）
 
 ### 新功能

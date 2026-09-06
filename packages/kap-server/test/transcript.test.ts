@@ -18,7 +18,7 @@ import {
   type Event2,
   type ScopeSeed,
 } from '@moonshot-ai/agent-core-v2';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import { type RunningServer, startServer } from '../src/start';
 import { TEST_HOST_IDENTITY } from './helpers/hostIdentity';
@@ -60,6 +60,14 @@ interface TranscriptContract {
     interactionKind?: string;
     toolCallId?: string;
     state: string;
+    [key: string]: unknown;
+  }[];
+  prompts: {
+    promptId: string;
+    status: string;
+    userMessageId?: string;
+    content?: unknown;
+    createdAt?: string;
     [key: string]: unknown;
   }[];
   meta: Record<string, unknown>;
@@ -116,7 +124,7 @@ describe('server-v2 /api/v1/sessions/{sid}/transcript', () => {
   let base: string;
   let seeds: ScopeSeed | undefined;
 
-  beforeEach(async () => {
+  beforeAll(async () => {
     home = await mkdtemp(join(tmpdir(), 'kimi-server-v2-transcript-'));
     const modelCatalog: IModelCatalog = {
       _serviceBrand: undefined,
@@ -158,7 +166,7 @@ describe('server-v2 /api/v1/sessions/{sid}/transcript', () => {
     base = `http://127.0.0.1:${server.port}`;
   }
 
-  afterEach(async () => {
+  afterAll(async () => {
     if (server !== undefined) {
       await server.close();
       server = undefined;
@@ -319,6 +327,55 @@ describe('server-v2 /api/v1/sessions/{sid}/transcript', () => {
     const frames = (body.data.items[0] as TurnContract).steps[0]!.frames;
     expect(frames).toContainEqual(
       expect.objectContaining({ kind: 'tool', toolCallId: 'call_9', approvalId: 'apr-1' }),
+    );
+  });
+
+  it('exposes the prompt queue entities in the live transcript response', async () => {
+    const id = await createSession();
+    await ensureMainAgent(id);
+    await getJson<TranscriptContract>(`/api/v1/sessions/${id}/transcript?agent_id=main`);
+
+    const bus = mainAgentBus(id);
+    bus.publish(
+      serverEvent({
+        type: 'prompt.submitted',
+        promptId: 'p1',
+        userMessageId: 'p1',
+        status: 'running',
+        content: [{ type: 'text', text: 'first' }],
+        createdAt: '2026-01-01T00:00:00.000Z',
+      }),
+    );
+    bus.publish(
+      serverEvent({
+        type: 'prompt.submitted',
+        promptId: 'p2',
+        userMessageId: 'p2',
+        status: 'queued',
+        content: [{ type: 'text', text: 'second' }],
+        createdAt: '2026-01-01T00:00:01.000Z',
+      }),
+    );
+
+    let { body } = await getJson<TranscriptContract>(`/api/v1/sessions/${id}/transcript?agent_id=main`);
+    expect(body.data.prompts).toContainEqual(
+      expect.objectContaining({
+        promptId: 'p1',
+        status: 'running',
+        userMessageId: 'p1',
+        content: [{ type: 'text', text: 'first' }],
+      }),
+    );
+    expect(body.data.prompts).toContainEqual(expect.objectContaining({ promptId: 'p2', status: 'queued' }));
+
+    bus.publish(serverEvent({ type: 'prompt.started', promptId: 'p2' }));
+    ({ body } = await getJson<TranscriptContract>(`/api/v1/sessions/${id}/transcript?agent_id=main`));
+    expect(body.data.prompts).toContainEqual(
+      expect.objectContaining({
+        promptId: 'p2',
+        status: 'running',
+        content: [{ type: 'text', text: 'second' }],
+      }),
     );
   });
 
@@ -998,9 +1055,10 @@ describe('server-v2 /api/v1/sessions/{sid}/transcript', () => {
     const main = byAgent.get('main')!;
     expect(main.messages.map((m) => [m.turn_id, m.prompt])).toEqual([
       ['t0', 'hi'],
+      ['t1', 'subagent run prompt'],
       ['t2', 'second question'],
     ]);
-    expect(main.messages[1]!.attachment_ids).toEqual(['att_1']);
+    expect(main.messages[2]!.attachment_ids).toEqual(['att_1']);
     expect(main.attachments).toEqual([
       expect.objectContaining({
         attachmentId: 'att_1',
