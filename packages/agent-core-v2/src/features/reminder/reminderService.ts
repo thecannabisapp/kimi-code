@@ -33,11 +33,7 @@ interface ReminderEntry {
   readonly variant: string;
 }
 
-const REMINDER_VARIANT_PRIORITY = new Map<string, number>([
-  ['date_change', -1],
-  ['context_budget', 1],
-  ['compaction_ahead', 2],
-]);
+const REMINDER_VARIANT_PRIORITY = new Map<string, number>([['date_change', -1]]);
 
 interface ReminderActorContext {
   readonly entries: Set<ReminderEntry>;
@@ -166,7 +162,7 @@ function appendResult(
 }
 
 async function inject(runtime: AgentActorContext<null>, isNewTurn: boolean): Promise<void> {
-  const entries = [...actorContext(runtime).entries].sort(
+  const entries = [...actorContext(runtime).entries].toSorted(
     (left, right) =>
       (REMINDER_VARIANT_PRIORITY.get(left.variant) ?? 0) -
       (REMINDER_VARIANT_PRIORITY.get(right.variant) ?? 0),

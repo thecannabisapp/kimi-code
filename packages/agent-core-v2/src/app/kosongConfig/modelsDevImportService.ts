@@ -11,9 +11,9 @@ import { ScopeActivation, registerScopedService } from '#/_base/di/scope';
 import { Error2 } from '#/_base/errors/errors';
 import { IAgentIdentity } from '#/app/agentIdentity/agentIdentity';
 import { IConfigService } from '#/app/config/config';
-import { IModelCatalog } from '#/kosong/model/catalog';
-import { type ModelsSection } from '#/kosong/model/model';
-import { type ProviderConfig, type ProvidersSection } from '#/kosong/provider/provider';
+import { IModelCatalog } from '#/llm-adapter/model/catalog';
+import { type ModelsSection } from '#/llm-adapter/model/model';
+import { type ProviderConfig, type ProvidersSection } from '#/llm-adapter/provider/provider';
 import { modelsDevProviderModels, resolveModelsDevImport } from './modelsDev';
 
 import { DEFAULT_MODEL_SECTION, MODELS_SECTION, PROVIDERS_SECTION } from './configSection';
@@ -196,10 +196,10 @@ export class ModelsDevImportService implements IModelsDevImportService {
         userAgent: await this.outboundUserAgent(),
         signal: AbortSignal.timeout(UPSTREAM_FETCH_TIMEOUT_MS),
       });
-    } catch (err) {
+    } catch (error) {
       throw new Error2(
         codes.REGISTRY_IMPORT_INVALID,
-        `custom registry at ${url} cannot be imported: ${truncateUpstreamMessage(err)}`,
+        `custom registry at ${url} cannot be imported: ${truncateUpstreamMessage(error)}`,
       );
     }
     if (Object.keys(entries).length === 0) {

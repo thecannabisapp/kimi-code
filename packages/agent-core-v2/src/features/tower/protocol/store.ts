@@ -76,6 +76,7 @@ export interface TowerPlanInput {
   readonly title: string;
   readonly scope: readonly string[];
   readonly tasks?: readonly string[];
+  readonly context?: string;
   readonly deps?: readonly string[];
   readonly kind?: TowerMissionKind;
 }
@@ -402,7 +403,7 @@ export class TowerStore {
         agent: agentId,
         kind: entry.kind,
         status,
-        reason: reason === undefined ? undefined : reason.replace(/\s+/g, ' ').slice(0, 200),
+        reason: reason === undefined ? undefined : reason.replaceAll(/\s+/g, ' ').slice(0, 200),
         mission: entry.missionId,
         target: entry.reviewTarget,
       },
@@ -452,6 +453,10 @@ export class TowerStore {
         worktree: `wt-${n}`,
         deps: item.deps ?? [],
         status: 'planned',
+        context:
+          item.context !== undefined && item.context.trim().length > 0
+            ? item.context.trim()
+            : undefined,
         tasks: (item.tasks ?? []).map((text) => ({ text, done: false })),
         notes: [],
         blockers: [],
@@ -1105,6 +1110,9 @@ export class TowerStore {
       '| ------ | -------- | ------ | ----- | ----- |',
       `| ${mission.branch} | ${mission.worktree} | ${STATUS_EMOJI[mission.status]} | ${mission.scope.join(', ')} | ${mission.owner ?? '—'} |`,
       '',
+      ...(mission.context !== undefined
+        ? ['## Context — the user\'s own words, verbatim', '', mission.context, '']
+        : []),
       '## Tasks',
       ...(mission.tasks.length > 0
         ? mission.tasks.map((t) => `- [${t.done ? 'x' : ' '}] ${t.text}`)

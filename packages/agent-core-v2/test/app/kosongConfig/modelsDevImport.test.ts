@@ -14,11 +14,11 @@ import { ModelsDevImportErrors } from '#/app/kosongConfig/errors';
 import { IKosongConfigService } from '#/app/kosongConfig/kosongConfig';
 import { IModelsDevImportService } from '#/app/kosongConfig/modelsDevImport';
 import '#/app/kosongConfig/modelsDevImportService';
-import { IModelCatalog, type ProviderCatalogItem } from '#/kosong/model/catalog';
-import type { ModelsSection } from '#/kosong/model/model';
-import type { ProvidersSection } from '#/kosong/provider/provider';
+import { IModelCatalog, type ProviderCatalogItem } from '#/llm-adapter/model/catalog';
+import type { ModelsSection } from '#/llm-adapter/model/model';
+import type { ProvidersSection } from '#/llm-adapter/provider/provider';
 
-import { StubConfigService } from '../../kosong/stubs';
+import { StubConfigService } from '../../stubs';
 import { stubBootstrap } from '../bootstrap/stubs';
 import { stubAgentIdentity } from '../agentIdentity/stubs';
 
@@ -154,7 +154,7 @@ async function expectError2(promise: Promise<unknown>, code: string): Promise<Er
     () => {
       throw new Error(`expected the call to throw ${code}`);
     },
-    (cause: unknown) => cause,
+    (error: unknown) => error,
   );
   expect(isError2(err)).toBe(true);
   expect((err as Error2).code).toBe(code);

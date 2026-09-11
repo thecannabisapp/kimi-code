@@ -9,7 +9,7 @@ import {
 } from '#/tool/toolContract';
 import { IBootstrapService } from '#/app/bootstrap/bootstrap';
 import { AGENT_WIRE_RECORD_KEY } from '#/wire/record';
-import type { ContentPart } from '#/kosong/contract/message';
+import type { ContentPart } from '#human/llm/message';
 import { IFileSystemStorageService } from '#/persistence/interface/storage';
 import { basename, join, normalize } from 'pathe';
 import {
@@ -329,8 +329,8 @@ function dropInlineSuffixLines(suffix: string, shapedText: string): string {
 
 function safeToolResultFileStem(toolName: string, toolCallId: string): string {
   const label = `${toolName}-${toolCallId}`
-    .replace(/[^a-zA-Z0-9._-]+/g, '_')
-    .replace(/^_+|_+$/g, '')
+    .replaceAll(/[^a-zA-Z0-9._-]+/g, '_')
+    .replaceAll(/^_+|_+$/g, '')
     .slice(0, 80);
   return label || 'tool-result';
 }
