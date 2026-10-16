@@ -1,5 +1,12 @@
 # Memory
 
+## 2026-10-16 (b) — v2.2.0 watch retry loop vs fake timers
+
+- TRAP (upstream bug, reproduces on pristine 2.2.0): `src/human/utils/watch.ts` retries a missing watch path every 250ms (`LISTING_MISSING_RETRY_MS`, no cap) and each retry fires a real `fs.watch` syscall (~90ms with xstate overhead). Any fake-timer test advancing a large window (e.g. `vi.advanceTimersByTimeAsync(DEFAULT_SUBAGENT_TIMEOUT_MS)` = 2h → ~29k retries) blows the 30s test timeout; wall-clock spend scales ~90ms real per 1s fake. Symptom: test body and afterEach complete (add probes to see it) yet vitest reports "Test timed out".
+- Fix pattern (test-local, minimal): `vi.stubEnv('KIMI_CODE_WATCH', '0')` before `vi.useFakeTimers()` + `vi.unstubAllEnvs()` in `afterEach`. Env beats config in `isWatchEnabled()`. Do NOT set the env in shared setup — `src/human/test/utils/watch.test.ts` exercises the watcher itself.
+- Companion fix same day: `fullCompaction.test.ts` hardcoded token constants shifted +164 by our fork's `thinking_level` param growing the Agent tool prompt: `6_135→6_299` (two sites), `6_142→6_306`, `6_159→6_323`. Note the numeric-separator spelling — grep for `6_135`, not `6135`.
+- Flake triage note: under parallel load (loadavg >15) the suite reports ~20 extra failures that all pass isolated; re-run suspects with `-t` on a quiet machine before believing them.
+
 ## 2026-10-16 — Upstream merge v2.2.0
 
 - Merged `@moonshot-ai/kimi-code@2.2.0` into `main` (merge commit `90291fc31`). 11 conflicts, all resolved upstream-wins except `goalService.ts` (kept our continuation pacing — `continuationMinIntervalMs` + `hasActiveBackgroundTasks()` — on upstream's renamed `IAgentLoopService.snapshot()`).

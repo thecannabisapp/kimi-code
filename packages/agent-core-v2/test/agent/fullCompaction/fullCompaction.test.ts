@@ -14,7 +14,7 @@ import { type StreamedMessagePart, type ToolCall } from '#human/llm/message';
 import type { FinishReason } from '#human/llm/finish-reason';
 import { fromLlmMessage } from '#/llm-adapter/contract/message';
 import type { TokenUsage } from '#human/llm/usage';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   DefaultCompactionStrategy,
@@ -101,6 +101,15 @@ const EXACT_COMPACTION_PROFILE: ResolvedAgentProfile = normalizeAgentProfile({
 });
 
 describe('FullCompaction', () => {
+  // The watch retry loop (250ms re-arms, real fs.watch syscall each) makes
+  // large fake-time advances cost ~90ms real per 1s fake — disable it.
+  beforeEach(() => {
+    vi.stubEnv('KIMI_CODE_WATCH', '0');
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
   it('keeps oversized trailing user messages as recent', () => {
     const strategy = testCompactionStrategy();
     const single = [
@@ -307,7 +316,7 @@ describe('FullCompaction', () => {
       properties: expect.objectContaining({
         agent_id: 'main',
         source: 'manual',
-        tokens_before: 6_135,
+        tokens_before: 6_299,
         tokens_after: expect.any(Number),
         duration_ms: expect.any(Number),
         compacted_count: 6,
@@ -582,7 +591,7 @@ describe('FullCompaction', () => {
       session_id: 'test-session',
       cwd: dir,
       trigger: 'auto',
-      token_count: 6_135,
+      token_count: 6_299,
     });
     expect(post).toMatchObject({
       hook_event_name: 'PostCompact',
@@ -1950,8 +1959,8 @@ describe('FullCompaction', () => {
       event: 'compaction_finished',
       properties: expect.objectContaining({
         source: 'auto',
-        tokens_before: 6_142,
-        tokens_after: 6_159,
+        tokens_before: 6_306,
+        tokens_after: 6_323,
         compacted_count: 7,
         retry_count: 0,
       }),

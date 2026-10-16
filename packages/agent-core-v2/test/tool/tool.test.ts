@@ -1307,6 +1307,7 @@ describe('Agent tool execution contract', () => {
 
   afterEach(async () => {
     vi.useRealTimers();
+    vi.unstubAllEnvs();
     await ctx?.dispose();
     ctx = undefined;
   });
@@ -3378,6 +3379,9 @@ describe('Agent tool execution contract', () => {
   });
 
   it('returns the spawned agent id when a foreground subagent times out', async () => {
+    // The 2h fake-time advance would otherwise fire the watch retry loop
+    // (250ms re-arms, each doing a real fs.watch attempt) ~29k times.
+    vi.stubEnv('KIMI_CODE_WATCH', '0');
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     const lifecycle = createAgentLifecycleStub({
       createAgentIds: ['agent-child'],
