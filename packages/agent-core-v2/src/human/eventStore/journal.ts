@@ -89,7 +89,7 @@ async function* readBranchChain(branch: Branch, tree: Tree): AsyncIterable<Journ
         : undefined;
     upto = parentSeq ?? null;
   }
-  for (const segment of chain.toReversed()) {
+  for (const segment of chain.reverse()) {
     for (const entry of segment.entries) {
       yield {
         branch: segment.name,

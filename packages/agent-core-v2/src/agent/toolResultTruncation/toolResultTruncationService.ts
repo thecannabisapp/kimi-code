@@ -329,8 +329,8 @@ function dropInlineSuffixLines(suffix: string, shapedText: string): string {
 
 function safeToolResultFileStem(toolName: string, toolCallId: string): string {
   const label = `${toolName}-${toolCallId}`
-    .replaceAll(/[^a-zA-Z0-9._-]+/g, '_')
-    .replaceAll(/^_+|_+$/g, '')
+    .replace(/[^a-zA-Z0-9._-]+/g, '_')
+    .replace(/^_+|_+$/g, '')
     .slice(0, 80);
   return label || 'tool-result';
 }

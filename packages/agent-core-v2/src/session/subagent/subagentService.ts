@@ -123,7 +123,7 @@ export class SessionSubagentService extends Service implements ISessionSubagentS
       : resolveSubagentBinding(
           this.configService,
           { modelAlias: own.modelAlias, thinkingLevel: own.thinkingLevel },
-          input.model ?? profile?.model,
+          input.model,
         );
     let model: Model;
     try {
@@ -131,7 +131,7 @@ export class SessionSubagentService extends Service implements ISessionSubagentS
     } catch (error) {
       throw wrapSubagentModelError(error, binding.model, own.modelAlias);
     }
-    const thinking = input.thinkingLevel ?? profile?.thinkingLevel ?? binding.thinking;
+    const thinking = input.thinkingLevel ?? binding.thinking;
     return {
       profileName: profile?.name ?? requestedProfileName,
       model: binding.model,

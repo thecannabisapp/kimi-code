@@ -81,7 +81,6 @@ export function resolveSubagentTimeoutMs(config: IConfigService): number {
 }
 
 export const PRIMARY_SUBAGENT_MODEL_CHOICE = 'primary';
-export type SubagentModelChoice = 'primary' | 'secondary' | (string & {});
 
 export interface SubagentModelPool {
   readonly defaultModel?: string;

@@ -33,7 +33,7 @@ export function createUsageMachine() {
           })),
           emit(({ context }) => ({
             type: 'usage.updated' as const,
-            record: context.records.at(-1) as UsageRecord,
+            record: context.records[context.records.length - 1] as UsageRecord,
             summary: context.summary,
           })),
         ],

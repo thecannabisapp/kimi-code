@@ -136,7 +136,7 @@ export class WsConnectionV1 implements BroadcastTarget {
   }
 
   get subscriptionSessionIds(): readonly string[] {
-    return Array.from(this.subscriptions.keys()).toSorted();
+    return Array.from(this.subscriptions.keys()).sort();
   }
 
   send(envelope: EventEnvelope, delivery: BroadcastDelivery = 'subscription'): void {
