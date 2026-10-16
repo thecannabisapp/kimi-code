@@ -17,6 +17,7 @@ import {
   ICapabilityService,
   IPluginService,
   IWorkspaceService,
+  NOTIFY_USER_UI_CAPABILITY,
   PluginChanged,
   logSeed,
   resolveConfigPath,
@@ -28,6 +29,7 @@ import {
 } from '@moonshot-ai/agent-core-v2';
 import {
   createKimiDefaultHeaders,
+  KIMI_CODE_PROVIDER_NAME,
   kimiRegionProfile,
   type KimiHostIdentity,
 } from '@moonshot-ai/kimi-code-oauth';
@@ -60,6 +62,7 @@ import { extractWsBearerToken } from './transport/ws/bearerProtocol';
 import { SessionEventBroadcaster } from './transport/ws/v1/sessionEventBroadcaster';
 import type { ConfigWarningItem } from './transport/ws/v1/events';
 import { registerWsV1, WS_PATH as WS_PATH_V1 } from './transport/ws/v1/registerWsV1';
+import { registerWsDebug, WS_DEBUG_PATH } from './transport/ws/debug/registerWsDebug';
 import { getServerVersion } from './version';
 import { classify } from './security/bindClassify';
 import {
@@ -80,7 +83,10 @@ import { TranscriptService } from './services/transcript/transcriptService';
 import { ModelCatalogRefreshScheduler } from './services/modelCatalog/modelCatalogRefreshScheduler';
 import { startConfigChangedPublisher } from './services/config/configChangedPublisher';
 import { createAuthFailureLimiter } from './middleware/rateLimit';
-import { createRemoteControlManager } from '@moonshot-ai/remote-control';
+import {
+  createRemoteControlManager,
+  RemoteControlDeviceClient,
+} from '@moonshot-ai/remote-control';
 
 import { createAuthTokenService, type IAuthTokenService } from './services/auth/authTokenService';
 import { createCredentialValidator } from './services/auth/credentials';
@@ -193,18 +199,6 @@ export async function startServer(opts: ServerStartOptions): Promise<RunningServ
   const logging = resolveLoggingConfig({ homeDir, env: process.env });
   let boundPort = port;
   const localOriginHost = host.includes(':') ? `[${host}]` : host;
-  const remoteControlManager = createRemoteControlManager({
-    homeDir,
-    localOrigin: () => `http://${localOriginHost}:${boundPort}`,
-    localServerToken: () => authTokenService.getToken(),
-    clientVersion: `kimi-code/${serverVersion}`,
-    stderr: {
-      write: (text) => {
-        logger.warn(String(text).trimEnd());
-        return true;
-      },
-    },
-  });
   const { app: core } = bootstrap(
     {
       homeDir,
@@ -216,10 +210,37 @@ export async function startServer(opts: ServerStartOptions): Promise<RunningServ
         skillDirs: opts.skillDirs,
         displayName: opts.hostIdentity.displayName,
         replyStyleGuide: opts.hostIdentity.replyStyleGuide,
+        uiCapabilities: [NOTIFY_USER_UI_CAPABILITY],
       },
     },
     [...logSeed(logging), ...(opts.seeds ?? [])],
   );
+
+  const readManagedOAuth = (): { key?: string; oauthHost?: string } | undefined =>
+    core.accessor
+      .get(IConfigService)
+      .inspect<Record<string, { oauth?: { key: string; oauthHost?: string } }>>('providers')
+      .userValue?.[KIMI_CODE_PROVIDER_NAME]?.oauth;
+  const remoteControlManager = createRemoteControlManager({
+    homeDir,
+    localOrigin: () => `http://${localOriginHost}:${boundPort}`,
+    localServerToken: () => authTokenService.getToken(),
+    clientVersion: `${opts.hostIdentity.productName}/${opts.hostIdentity.version}`,
+    urlSource: opts.hostIdentity.platform,
+    configuredOAuthKey: () => readManagedOAuth()?.key,
+    configuredOAuthHost: () => readManagedOAuth()?.oauthHost,
+    stderr: {
+      write: (text) => {
+        logger.warn(String(text).trimEnd());
+        return true;
+      },
+    },
+  });
+  const remoteControlDevices = new RemoteControlDeviceClient({
+    homeDir,
+    configuredOAuthKey: () => readManagedOAuth()?.key,
+    configuredOAuthHost: () => readManagedOAuth()?.oauthHost,
+  });
 
   let telemetry: ServerTelemetry = {};
   if (opts.telemetry === true) {
@@ -303,6 +324,9 @@ export async function startServer(opts: ServerStartOptions): Promise<RunningServ
   }
 
   const close = async (): Promise<void> => {
+    if (wssDebug !== undefined) {
+      for (const client of wssDebug.clients) client.terminate();
+    }
     configChangedPublisher.close();
     await remoteControlManager.close();
     await app.close();
@@ -448,6 +472,8 @@ export async function startServer(opts: ServerStartOptions): Promise<RunningServ
         process.env['KIMI_CODE_PLUGIN_MARKETPLACE_FROM_DEV_SERVER'] === '1'),
     remoteControl: {
       service: remoteControlManager,
+      devices: remoteControlDevices,
+      homeDir,
       staticEnableError:
         exposureClass !== 'loopback'
           ? 'Remote Control requires a loopback host.'
@@ -456,7 +482,7 @@ export async function startServer(opts: ServerStartOptions): Promise<RunningServ
             : undefined,
     },
     onShutdown: () => {
-      void close().catch((error: unknown) => logger.error({ error }, 'server close failed'));
+      void close().catch((error: unknown) => logger.error({ err: error }, 'server close failed'));
     },
     connectionRegistry,
     broadcaster,
@@ -473,6 +499,7 @@ export async function startServer(opts: ServerStartOptions): Promise<RunningServ
     broadcaster,
     logger,
   });
+  const wssDebug = debugEndpoints ? registerWsDebug() : undefined;
 
   const handleUpgrade = async (
     req: IncomingMessage,
@@ -481,7 +508,9 @@ export async function startServer(opts: ServerStartOptions): Promise<RunningServ
   ): Promise<void> => {
     const url = req.url ?? '';
     const isV1 = url === WS_PATH_V1 || url.startsWith(`${WS_PATH_V1}?`);
-    if (!isV1) {
+    const isDebug = url === WS_DEBUG_PATH || url.startsWith(`${WS_DEBUG_PATH}?`);
+    const wss = isV1 ? wssV1 : isDebug ? wssDebug : undefined;
+    if (wss === undefined) {
       socket.destroy();
       return;
     }
@@ -543,7 +572,7 @@ export async function startServer(opts: ServerStartOptions): Promise<RunningServ
     }
 
     (socket as Socket).setNoDelay(true);
-    wssV1.handleUpgrade(req, socket, head, (ws) => wssV1.emit('connection', ws, req));
+    wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
   };
   app.server.on('upgrade', (req, socket, head) => {
     void handleUpgrade(req, socket, head).catch((error: unknown) =>
@@ -554,6 +583,7 @@ export async function startServer(opts: ServerStartOptions): Promise<RunningServ
   app.addHook('onClose', async () => {
     connectionRegistry.closeAll('server shutting down');
     wssV1.close();
+    wssDebug?.close();
     await broadcaster.close();
   });
 

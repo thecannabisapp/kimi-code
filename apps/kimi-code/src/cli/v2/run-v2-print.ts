@@ -8,7 +8,7 @@
  *   - creates / resumes a session and its main agent via native services,
  *   - subscribes to the main agent's per-agent `IEventBus` and renders the
  *     native `Event2` stream (payloads are already v1-protocol-shaped),
- *   - drives a turn through `IAgentPromptService.enqueue()` and awaits
+ *   - drives a turn through `IAgentLoopService.enqueuePrompt()` and awaits
  *     `Turn.result` for authoritative completion,
  *   - applies the print-mode background policy (config-driven, v1-aligned:
  *     `exit` / `drain` / `steer`) before exiting.
@@ -23,7 +23,6 @@ import {
   IAgentLoopService,
   IAgentPermissionModeService,
   IAgentProfileService,
-  IAgentPromptService,
   IAgentTaskService,
   IAuthSummaryService,
   IBootstrapService,
@@ -43,7 +42,6 @@ import {
   createCloudAppender,
   ensureMainAgent,
   resumeSessionById,
-  loadAgentProfilesFromDir,
   logSeed,
   parseAgentFileText,
   resolveAgentPath,
@@ -163,10 +161,6 @@ export async function runV2Print(
   const logging = resolveLoggingConfig({ homeDir, env: process.env });
   const identity = createKimiCodeHostIdentity(version);
   const hostHeaders = createKimiDefaultHeaders({ homeDir, ...identity });
-
-  if (opts.agentsDir !== undefined) {
-    loadAgentProfilesFromDir(opts.agentsDir);
-  }
 
   const { app } = bootstrap(
     {
@@ -531,7 +525,7 @@ export function formatTrustGatedMcpWarning(servers: readonly TrustGatedMcpServer
   const list = servers.map((server) => `${server.name} (${server.target})`).join(', ');
   return (
     `Warning: this folder is not trusted; skipped ${servers.length} project-level MCP ${noun}: ${list}.\n` +
-    '  Run `kimi` here and choose "Trust this folder" to enable them.\n\n'
+    '  Run `kimi` here and choose "Trust this folder", or set KIMI_CODE_TRUST_WORKSPACE=1, to enable them.\n\n'
   );
 }
 
@@ -568,14 +562,12 @@ async function runNativeTurn(
     if (event.type === 'turn.ended') turnEndings.push(event as TurnEnded);
   });
   try {
-    const handle = await agent.accessor.get(IAgentPromptService).enqueue({
-      message: {
-        role: 'user',
-        content: [{ type: 'text', text: prompt }],
-        toolCalls: [],
-        origin: { kind: 'user' },
-      },
+    const loop = agent.accessor.get(IAgentLoopService);
+    const { id } = loop.submit({
+      message: { role: 'user', content: [{ type: 'text', text: prompt }] },
+      meta: { origin: { kind: 'user' }, tracked: true },
     });
+    const handle = loop.promptHandle(id)!;
     const turn = await handle.launched;
     if (turn === undefined) {
       // A prompt blocked by an onBeforeSubmitPrompt hook never launches a turn.
@@ -595,6 +587,10 @@ async function runNativeTurn(
     // final message.
     writer.flushAssistant();
     if (result.type === 'completed') {
+      const skipTurnId = turn.id;
+      if (skipTurnId === undefined) {
+        throw new Error('Prompt turn ended before it started');
+      }
       const configService = app.accessor.get(IConfigService);
       const taskConfig = resolveAgentTaskConfig(configService);
       const goalService = agent.accessor.get(IAgentGoalService);
@@ -607,11 +603,12 @@ async function runNativeTurn(
           countPending: () => countPendingBackgroundTasks(session),
           drain: () => drainBackgroundTasks(session, taskConfig?.printWaitCeilingS),
           turnEndings,
-          skipTurnId: turn.id,
+          skipTurnId,
           warn: (message) => stderr.write(`Warning: ${message}\n`),
           now: () => Date.now(),
           goalActive: () => goalService.getGoal().goal?.status === 'active',
           cronNextFireAt: () => cronService.getNextFireTime(),
+          turnActive: () => loop.snapshot().state === 'running',
         });
       } catch (error) {
         // A steered turn that fails fails the run (v1 parity). Anything else
@@ -832,12 +829,28 @@ export interface PrintBackgroundPolicyInput {
    * `exit`/`drain` too (v1 parity). Omitted = no cron waiting.
    */
   readonly cronNextFireAt?: () => number | null;
+  /**
+   * Reports whether the agent loop has a turn in flight. A turn steered by a
+   * cron fire is pending work the schedule alone cannot see: a fired
+   * one-shot task disappears from `cronNextFireAt` at once, and a recurring
+   * one keeps reporting the same past fire time until the tick can run
+   * again. While this returns true the policy waits the turn out instead of
+   * reading either signal as quiescence or a wedged tick. Omitted = no
+   * in-flight turn is ever observed.
+   */
+  readonly turnActive?: () => boolean;
 }
 
 /**
  * Apply the print-mode (`kimi -p`) background-resource policy after the main
  * turn completes. A single loop re-evaluates the Session's live resources in
  * order on every round and stays alive while any of them is pending:
+ *  - turn    : while the loop has a turn in flight (e.g. steered by a cron
+ *              fire), wait it out — the schedule cannot represent it: a fired
+ *              one-shot task vanishes from `cronNextFireAt` at once, and a
+ *              recurring one reports the same past fire time until the tick
+ *              runs again, so neither signal may be read as quiescence or a
+ *              wedged tick mid-turn.
  *  - goal    : while a goal is `active`, keep waiting for its continuation
  *              turns (bounded by `ceilingS` as a safety net), regardless of
  *              the background mode; the goal summary drives the exit code.
@@ -870,6 +883,23 @@ export async function applyPrintBackgroundPolicy(
   let lastPastFireAt: number | undefined;
   let cronWedged = false;
   for (;;) {
+    // (0) turn: an in-flight turn (e.g. steered by a cron fire) is pending
+    // work the schedule cannot represent — a fired one-shot task is gone
+    // from `cronNextFireAt`, and a recurring one reports a frozen past fire
+    // time while the tick waits for the loop to go idle. Wait the turn out
+    // before reading either signal as quiescence or a wedged tick.
+    if (input.turnActive?.() === true) {
+      const ended = await input.turnEndings.next(deadline - input.now(), input.skipTurnId);
+      if (ended !== null && ended.reason !== 'completed') {
+        throw new PrintSteeredTurnFailedError(formatTurnEndingFailure(ended));
+      }
+      if (ended === null) {
+        input.warn(`print turn wait ceiling reached (${input.ceilingS}s), finishing`);
+        return;
+      }
+      continue;
+    }
+
     // (a) goal: while a goal is `active`, keep waiting for its continuation
     // turns. Also wake on a short poll: a goal can leave `active` without any
     // further turn.ended (budget block at a turn boundary, or a pause after a
@@ -985,14 +1015,6 @@ async function quiesceSessionAgents(
   mainAgent: IAgentScopeHandle,
 ): Promise<(() => void) | undefined> {
   const handles = collectSessionAgentHandles(session, mainAgent);
-  const promptServices = handles.flatMap((handle) => {
-    try {
-      return [handle.accessor.get(IAgentPromptService)];
-    } catch {
-      // A torn-down agent scope has no prompt service to drain or observe.
-      return [];
-    }
-  });
   const loops = handles.flatMap((handle) => {
     try {
       return [handle.accessor.get(IAgentLoopService)];
@@ -1015,9 +1037,10 @@ async function quiesceSessionAgents(
   // Repeat until every queue is empty and every loop freezable: a prompt can
   // still surface from the launch window or a cancelled turn's settle chain.
   for (;;) {
-    await Promise.allSettled(promptServices.map((service) => service.drain()));
     for (const loop of loops) {
-      for (const turnId of loop.status().pendingTurnIds) loop.cancel(turnId);
+      for (const queueId of loop.snapshot().queue.map((item) => item.meta?.promptId)) {
+        if (queueId !== undefined) loop.cancel({ promptId: queueId });
+      }
       loop.cancel();
     }
     await Promise.allSettled(loops.map((loop) => loop.settled()));
@@ -1037,14 +1060,10 @@ async function quiesceSessionAgents(
       }
       guards.push(guard);
     }
-    const busy = promptServices.some((service) => {
+    const busy = loops.some((loop) => {
       try {
-        const snapshot = service.list();
-        return (
-          snapshot.launching ||
-          snapshot.active !== undefined ||
-          snapshot.pending.length > 0
-        );
+        const snapshot = loop.snapshot();
+        return snapshot.state === 'running' || snapshot.queue.length > 0;
       } catch {
         return false;
       }

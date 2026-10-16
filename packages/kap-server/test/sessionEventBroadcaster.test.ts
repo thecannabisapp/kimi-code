@@ -3,7 +3,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import type {
-  AgentActivityState,
   AgentContext,
   IScopeHandle,
   Scope,
@@ -12,10 +11,11 @@ import type {
   SessionActivityState,
 } from '@moonshot-ai/agent-core-v2';
 import {
-  IAgentActivityView,
   INTERACTION_TAG_SESSION_ID,
   LifecycleScope,
   IAgentLifecycleService,
+  IAgentConversationUndoParticipantRegistry,
+  IAgentLoopService,
   IAgentProfileService,
   IAgentScopeContext,
   IEventBus,
@@ -35,6 +35,12 @@ import {
   makeAgentScopeContext,
 } from '@moonshot-ai/agent-core-v2';
 import { TurnStarted } from '@moonshot-ai/agent-core-v2/agent/loop/turnEvents';
+import { Event2 } from '@moonshot-ai/agent-core-v2/app/event/event2';
+import {
+  AgentEventBusView,
+  EventBusService,
+} from '@moonshot-ai/agent-core-v2/app/event/eventBusService';
+import type { AgentActivitySnapshot } from '@moonshot-ai/agent-core-v2/agent/loop/loop';
 import type { AgentEvent } from '../src/transport/ws/v1/events';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -96,11 +102,16 @@ class FakeEventBus {
   }
 }
 
+class ShardedProbe extends Event2<{ readonly marker: string }> {
+  static override readonly type = 'test.shardedProbe';
+}
+
 class FakeAgentHandle {
   readonly kind = LifecycleScope.Agent;
   readonly bus = new FakeAgentBus();
   readonly accessor;
   readonly context: AgentContext;
+  activity: AgentActivitySnapshot = {};
   private readonly services = new Map<unknown, unknown>();
   constructor(readonly id: string) {
     const scope = makeAgentScopeContext({
@@ -111,6 +122,15 @@ class FakeAgentHandle {
     this.context = scope.agentContext;
     this.services.set(IAgentScopeContext, scope);
     this.services.set(IEventBus, this.bus);
+    this.services.set(IAgentConversationUndoParticipantRegistry, {
+      register: () => ({ dispose: () => {} }),
+    });
+    this.services.set(IAgentLoopService, {
+      snapshot: () => ({
+        state: this.activity.turn === undefined ? 'idle' : 'running',
+        turn: this.activity.turn,
+      }),
+    });
     this.accessor = {
       get: (token: unknown) => this.services.get(token),
     };
@@ -154,35 +174,22 @@ class FakeLifecycle {
   }
   addAgent(id: string): FakeAgentHandle {
     const handle = new FakeAgentHandle(id);
-    handle.set(IAgentActivityView, {
-      state: () => ({ lifecycle: 'ready', background: [] }),
+    const onTurnStarted = handle.bus.subscribe((e) => {
+      if (e.type !== 'turn.started') return;
+      handle.activity = {
+        turn: {
+          turnId: (e as { turnId?: number }).turnId ?? 0,
+          phase: 'running',
+          step: 1,
+          ending: false,
+          activeToolCalls: [],
+          since: 0,
+        },
+      };
     });
-    const onTurnStarted = handle.bus.subscribe('turn.started', (e) => {
-      handle.bus.emit(
-        agentEvent('agent.activity.updated', {
-          lifecycle: 'ready',
-          turn: {
-            turnId: (e as { turnId?: number }).turnId,
-            phase: 'running',
-            step: 0,
-            ending: false,
-            pendingApprovals: [],
-            activeToolCalls: [],
-            since: 0,
-          },
-          background: [],
-        }),
-      );
-    });
-    const onTurnEnded = handle.bus.subscribe('turn.ended', (e) => {
-      const ended = e as { turnId?: number; reason?: string };
-      handle.bus.emit(
-        agentEvent('agent.activity.updated', {
-          lifecycle: 'ready',
-          lastTurn: { turnId: ended.turnId, reason: ended.reason },
-          background: [],
-        }),
-      );
+    const onTurnEnded = handle.bus.subscribe((e) => {
+      if (e.type !== 'turn.ended') return;
+      handle.activity = {};
     });
     this.turnCounters.set(id, {
       dispose: () => {
@@ -203,6 +210,11 @@ class FakeLifecycle {
       for (const cb of this.disposeHandlers) cb(removed.context);
     }
   }
+}
+
+function mapReason(reason: string | undefined): 'completed' | 'cancelled' | 'failed' | undefined {
+  if (reason === undefined) return undefined;
+  return reason === 'completed' ? 'completed' : reason === 'cancelled' ? 'cancelled' : 'failed';
 }
 
 class FakeSessionActivityView {
@@ -244,26 +256,65 @@ class FakeSessionActivityView {
 
   private attach(handle: FakeAgentHandle): void {
     if (this.folds.has(handle.id)) return;
-    const view = handle.accessor.get(IAgentActivityView) as
-      | { state(): AgentActivityState }
-      | undefined;
-    this.folds.set(handle.id, this.foldOf(handle.id, view?.state()));
-    this.busSubscriptions.set(
-      handle.id,
-      handle.bus.subscribe('agent.activity.updated', (event) => {
-        this.onActivity(handle.id, event as unknown as AgentActivityState);
-      }),
-    );
+    this.folds.set(handle.id, {
+      turnActive: handle.activity.turn !== undefined,
+      background: 0,
+    });
+    const subscriptions = [
+      handle.bus.subscribe('turn.started', () =>
+        this.patchFold(handle.id, (f) => ({
+          ...f,
+          turnActive: true,
+          lastTurnReason: handle.id === MAIN_AGENT_ID ? undefined : f.lastTurnReason,
+        })),
+      ),
+      handle.bus.subscribe('turn.ended', (e) =>
+        this.patchFold(handle.id, (f) => ({
+          ...f,
+          turnActive: false,
+          lastTurnReason:
+            handle.id === MAIN_AGENT_ID
+              ? mapReason((e as { reason?: string }).reason)
+              : f.lastTurnReason,
+        })),
+      ),
+      handle.bus.subscribe('task.started', () =>
+        this.patchFold(handle.id, (f) => ({ ...f, background: f.background + 1 })),
+      ),
+      handle.bus.subscribe('task.terminated', () =>
+        this.patchFold(handle.id, (f) => ({ ...f, background: f.background - 1 })),
+      ),
+      handle.bus.subscribe('compaction.started', () =>
+        this.patchFold(handle.id, (f) => ({ ...f, background: f.background + 1 })),
+      ),
+      handle.bus.subscribe('compaction.completed', () =>
+        this.patchFold(handle.id, (f) => ({ ...f, background: f.background - 1 })),
+      ),
+      handle.bus.subscribe('compaction.cancelled', () =>
+        this.patchFold(handle.id, (f) => ({ ...f, background: f.background - 1 })),
+      ),
+    ];
+    this.busSubscriptions.set(handle.id, {
+      dispose: () => subscriptions.forEach((s) => s.dispose()),
+    });
   }
 
-  private onActivity(agentId: string, snapshot: AgentActivityState): void {
+  private patchFold(
+    agentId: string,
+    patch: (fold: {
+      turnActive: boolean;
+      background: number;
+      lastTurnReason?: 'completed' | 'cancelled' | 'failed';
+    }) => {
+      turnActive: boolean;
+      background: number;
+      lastTurnReason?: 'completed' | 'cancelled' | 'failed';
+    },
+  ): void {
     const previous = this.folds.get(agentId);
-    const next = this.foldOf(agentId, snapshot, previous);
+    if (previous === undefined) return;
+    const next = patch(previous);
     this.folds.set(agentId, next);
-    if (previous === undefined) {
-      this.recompute('agent_lifecycle');
-      return;
-    }
     let cause: SessionActivityCause | undefined;
     if (!previous.turnActive && next.turnActive) cause = 'turn_started';
     else if (previous.turnActive && !next.turnActive) cause = 'turn_ended';
@@ -272,28 +323,6 @@ class FakeSessionActivityView {
       cause = 'turn_ended';
     }
     if (cause !== undefined) this.recompute(cause);
-  }
-
-  private foldOf(
-    agentId: string,
-    activity: AgentActivityState | undefined,
-    previous?: { lastTurnReason?: 'completed' | 'cancelled' | 'failed' },
-  ) {
-    const reason = activity?.lastTurn?.reason;
-    return {
-      turnActive: activity?.turn !== undefined,
-      background: activity?.background?.length ?? 0,
-      lastTurnReason:
-        agentId === MAIN_AGENT_ID
-          ? reason === undefined
-            ? undefined
-            : reason === 'completed'
-              ? 'completed'
-              : reason === 'cancelled'
-                ? 'cancelled'
-                : 'failed'
-          : previous?.lastTurnReason,
-    };
   }
 
   private recompute(cause: SessionActivityCause): void {
@@ -740,27 +769,8 @@ describe('SessionEventBroadcaster', () => {
     const { target, envelopes } = collectingTarget();
     await bc.subscribe('s1', target);
 
-    main.bus.emit(
-      agentEvent('agent.activity.updated', {
-        lifecycle: 'ready',
-        turn: {
-          turnId: 1,
-          origin: { kind: 'user' },
-          phase: 'running',
-          step: 1,
-          ending: false,
-          pendingApprovals: [],
-          activeToolCalls: [],
-          since: 100,
-        },
-      }),
-    );
-    main.bus.emit(
-      agentEvent('agent.activity.updated', {
-        lifecycle: 'ready',
-        lastTurn: { turnId: 1, reason: 'completed', at: 200 },
-      }),
-    );
+    main.bus.emit(agentEvent('turn.started', { turnId: 1, origin: { kind: 'user' } }));
+    main.bus.emit(agentEvent('turn.ended', { turnId: 1, reason: 'completed' }));
     await bc.getCursor('s1');
 
     const statuses = envelopes.filter((envelope) => envelope.type === 'agent.status.updated');
@@ -947,6 +957,58 @@ describe('SessionEventBroadcaster', () => {
     expect(envelopes.filter((e) => e.volatile !== true).map((e) => e.seq)).toEqual([1, 2, 3]);
     expect(envelopes[0]).toMatchObject({ type: 'agent.created' });
     expect((envelopes[0]!.payload as { agentId: string }).agentId).toBe('main');
+  });
+
+  it('delivers each agent exactly its own events through the real sharded session bus', async () => {
+    const lc = new FakeLifecycle();
+    const main = lc.addAgent('main');
+    const sub = lc.addAgent('agent-1');
+    sessions.set('s1', lc);
+    const sessionBus = new EventBusService();
+    sessionBus.activateAgent(main.context);
+    sessionBus.activateAgent(sub.context);
+    main.set(
+      IEventBus,
+      new AgentEventBusView(
+        sessionBus,
+        main.accessor.get(IAgentScopeContext) as IAgentScopeContext,
+      ),
+    );
+    sub.set(
+      IEventBus,
+      new AgentEventBusView(
+        sessionBus,
+        sub.accessor.get(IAgentScopeContext) as IAgentScopeContext,
+      ),
+    );
+    const { target, envelopes } = collectingTarget();
+    await bc.subscribe('s1', target);
+
+    sessionBus.publish(
+      new TurnStarted({ agentId: 'main', turnId: 1, origin: { kind: 'user' } }),
+      main.context,
+    );
+    sessionBus.publish(new ShardedProbe({ marker: 'main' }), main.context);
+    sessionBus.publish(
+      new TurnStarted({ agentId: 'agent-1', turnId: 9, origin: { kind: 'user' } }),
+      sub.context,
+    );
+    sessionBus.publish(new ShardedProbe({ marker: 'sub' }), sub.context);
+    sessionBus.publish(new ShardedProbe({ marker: 'orphan' }));
+    await bc.getCursor('s1');
+
+    const delivered = envelopes.filter(
+      (e) => e.type === 'turn.started' || e.type === 'test.shardedProbe',
+    );
+    expect(delivered.map((e) => [e.type, (e.payload as { agentId?: unknown }).agentId])).toEqual([
+      ['turn.started', 'main'],
+      ['test.shardedProbe', 'main'],
+      ['turn.started', 'agent-1'],
+      ['test.shardedProbe', 'agent-1'],
+    ]);
+    expect(envelopes.some((e) => (e.payload as { marker?: unknown }).marker === 'orphan')).toBe(
+      false,
+    );
   });
 
   it('broadcasts agent.disposed only for agents this state attached', async () => {
@@ -1761,13 +1823,13 @@ describe('SessionEventBroadcaster', () => {
     await bc.subscribe('s1', target);
 
     main.bus.emit(
-      agentEvent('agent.activity.updated', {
-        lifecycle: 'ready',
-        background: [{ kind: 'process', id: 'bash-1', since: 100 }],
+      agentEvent('task.started', {
+        agentId: 'main',
+        info: { taskId: 'bash-1', kind: 'process', description: 'bash-1', status: 'running', startedAt: 100 },
       }),
     );
     await bc.getCursor('s1');
-    main.bus.emit(agentEvent('agent.activity.updated', { lifecycle: 'ready', background: [] }));
+    main.bus.emit(agentEvent('task.terminated', { agentId: 'main', taskId: 'bash-1' }));
     await bc.getCursor('s1');
 
     const workChanged = envelopes.filter((e) => e.type === 'event.session.work_changed');
@@ -1775,8 +1837,7 @@ describe('SessionEventBroadcaster', () => {
       { busy: true, last_turn_reason: undefined },
       { busy: false, last_turn_reason: undefined },
     ]);
-    expect(envelopes.filter((e) => e.type === 'agent.status.updated').map((e) => e.payload))
-      .toMatchObject([{ phase: { kind: 'idle' } }, { phase: { kind: 'idle' } }]);
+    expect(envelopes.filter((e) => e.type === 'agent.status.updated')).toHaveLength(0);
   });
 
   it('emits the first background-work change from an agent created after activation', async () => {
@@ -1788,9 +1849,9 @@ describe('SessionEventBroadcaster', () => {
 
     const late = lc.addAgent('agent-0');
     late.bus.emit(
-      agentEvent('agent.activity.updated', {
-        lifecycle: 'ready',
-        background: [{ kind: 'process', id: 'bash-1', since: 100 }],
+      agentEvent('task.started', {
+        agentId: 'agent-0',
+        info: { taskId: 'bash-1', kind: 'process', description: 'bash-1', status: 'running', startedAt: 100 },
       }),
     );
     await bc.getCursor('s1');
@@ -1809,9 +1870,9 @@ describe('SessionEventBroadcaster', () => {
     await bc.subscribe('s1', target);
 
     sub.bus.emit(
-      agentEvent('agent.activity.updated', {
-        lifecycle: 'ready',
-        background: [{ kind: 'process', id: 'bash-1', since: 100 }],
+      agentEvent('task.started', {
+        agentId: 'agent-0',
+        info: { taskId: 'bash-1', kind: 'process', description: 'bash-1', status: 'running', startedAt: 100 },
       }),
     );
     await bc.getCursor('s1');
@@ -2051,6 +2112,78 @@ describe('SessionEventBroadcaster', () => {
     });
   });
 
+  it('delivers sub-agent approval events past the agent filter on live fan-out and replay', async () => {
+    const lc = new FakeLifecycle();
+    lc.addAgent('main');
+    lc.addAgent('agent-0');
+    sessions.set('s1', lc);
+    const { target, envelopes } = collectingTarget();
+    await bc.subscribe('s1', target, new Set(['main']));
+
+    interactions.enqueue({
+      id: 'a-sub',
+      kind: 'approval',
+      payload: {
+        toolCallId: 'call_sub',
+        toolName: 'Bash',
+        action: 'run',
+        display: { kind: 'command', command: 'ls' },
+      },
+      tags: { agentId: 'agent-0', sessionId: 's1' },
+    });
+    await bc.getCursor('s1');
+
+    expect(
+      envelopes.find((e) => e.type === 'event.approval.requested')?.payload,
+    ).toMatchObject({ agentId: 'agent-0', agent_id: 'agent-0', approval_id: 'a-sub' });
+
+    interactions.respond('a-sub', { decision: 'approved' });
+    await bc.getCursor('s1');
+
+    expect(
+      envelopes.find((e) => e.type === 'event.approval.resolved')?.payload,
+    ).toMatchObject({ agentId: 'agent-0', approval_id: 'a-sub' });
+
+    const replay = await bc.getBufferedSince('s1', { seq: 1 }, new Set(['main']));
+    expect(replay.resyncRequired).toBe(false);
+    expect(replay.events.map((e) => e.envelope.type)).toEqual([
+      'event.approval.requested',
+      'event.approval.resolved',
+      'event.session.work_changed',
+    ]);
+  });
+
+  it('delivers sub-agent question events past the agent filter on live fan-out', async () => {
+    const lc = new FakeLifecycle();
+    lc.addAgent('main');
+    lc.addAgent('agent-0');
+    sessions.set('s1', lc);
+    const { target, envelopes } = collectingTarget();
+    await bc.subscribe('s1', target, new Set(['main']));
+
+    interactions.enqueue({
+      id: 'q-sub',
+      kind: 'question',
+      payload: {
+        toolCallId: 'call_q',
+        questions: [{ question: 'Pick', options: [{ label: 'A' }] }],
+      },
+      tags: { agentId: 'agent-0', sessionId: 's1' },
+    });
+    await bc.getCursor('s1');
+
+    expect(
+      envelopes.find((e) => e.type === 'event.question.requested')?.payload,
+    ).toMatchObject({ agentId: 'agent-0', agent_id: 'agent-0', question_id: 'q-sub' });
+
+    interactions.respond('q-sub', { answers: { q_0: 'opt_0_0' } });
+    await bc.getCursor('s1');
+
+    expect(
+      envelopes.find((e) => e.type === 'event.question.answered')?.payload,
+    ).toMatchObject({ agentId: 'agent-0', question_id: 'q-sub' });
+  });
+
   it('fans event.session.work_changed out to every connection, bypassing agent filters', async () => {
     const lc = new FakeLifecycle();
     const main = lc.addAgent('main');
@@ -2122,8 +2255,10 @@ describe('SessionEventBroadcaster', () => {
     expect(envelopes.map((e) => e.type)).toEqual([
       'task.started',
       'background.task.started',
+      'event.session.work_changed',
       'task.terminated',
       'background.task.terminated',
+      'event.session.work_changed',
     ]);
     expect(envelopes[1]!.payload).toMatchObject({
       type: 'background.task.started',
@@ -2131,13 +2266,13 @@ describe('SessionEventBroadcaster', () => {
       agentId: 'main',
       sessionId: 's1',
     });
-    expect(envelopes[3]!.payload).toMatchObject({
+    expect(envelopes[4]!.payload).toMatchObject({
       type: 'background.task.terminated',
       agentId: 'main',
       sessionId: 's1',
     });
     expect(envelopes.every((e) => e.volatile === undefined)).toBe(true);
-    expect(envelopes.map((e) => e.seq)).toEqual([1, 2, 3, 4]);
+    expect(envelopes.map((e) => e.seq)).toEqual([1, 2, 3, 4, 5, 6]);
   });
 
   it('delivers only the allowlisted agent events on live fan-out', async () => {
@@ -2337,14 +2472,13 @@ describe('SessionEventBroadcaster', () => {
 
       main.bus.emit(agentEvent('turn.started', { turnId: 1, origin: { kind: 'user' } }));
       for (const view of [deltaView, blockView, turnView]) {
-        const batches = transcriptEnvelopes(view.envelopes).slice(-2);
+        const batches = transcriptEnvelopes(view.envelopes).slice(-1);
         for (const ops of batches) {
           expect(ops.type).toBe('transcript.ops');
           expect(ops.volatile).toBe(true);
         }
         expect(batches.map((ops) => (ops.payload as OpsPayload).ops.map((o) => o.op))).toEqual([
-          ['turn.upsert', 'meta.merge'],
-          ['meta.merge'],
+          ['turn.upsert', 'meta.merge', 'meta.merge'],
         ]);
       }
       expect(transcriptEnvelopes(plainView.envelopes)).toHaveLength(0);
@@ -2623,20 +2757,16 @@ describe('SessionEventBroadcaster', () => {
       expect(transcriptEnvelopes(view.envelopes)).toHaveLength(1);
 
       main.bus.emit(agentEvent('turn.started', { turnId: 1, origin: { kind: 'user' } }));
-      expect(transcriptEnvelopes(view.envelopes)).toHaveLength(3);
+      expect(transcriptEnvelopes(view.envelopes)).toHaveLength(2);
 
       const sub = lc.addAgent('sub-1');
       sub.bus.emit(agentEvent('turn.started', { turnId: 1, origin: { kind: 'user' } }));
       const frames = transcriptEnvelopes(view.envelopes);
-      expect(frames).toHaveLength(6);
+      expect(frames).toHaveLength(4);
       const subFrames = frames.filter(
         (e) => (e.payload as { agent_id?: string }).agent_id === 'sub-1',
       );
-      expect(subFrames.map((e) => e.type)).toEqual([
-        'transcript.reset',
-        'transcript.ops',
-        'transcript.ops',
-      ]);
+      expect(subFrames.map((e) => e.type)).toEqual(['transcript.reset', 'transcript.ops']);
     });
 
     it('sends an items-empty baseline reset marking older history, with global state and the watermark', async () => {
@@ -2695,9 +2825,9 @@ describe('SessionEventBroadcaster', () => {
       expect(transcriptEnvelopes(view.envelopes).at(-1)!.type).toBe('transcript.ops');
 
       const late = lc.addAgent('agent-0');
-      expect(transcriptEnvelopes(view.envelopes)).toHaveLength(3);
+      expect(transcriptEnvelopes(view.envelopes)).toHaveLength(2);
       late.bus.emit(agentEvent('turn.started', { turnId: 1, origin: { kind: 'user' } }));
-      expect(transcriptEnvelopes(view.envelopes)).toHaveLength(3);
+      expect(transcriptEnvelopes(view.envelopes)).toHaveLength(2);
     });
 
     it('stamps ops payloads with the batch seq and resets with the watermark', async () => {

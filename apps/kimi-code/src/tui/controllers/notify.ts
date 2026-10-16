@@ -12,6 +12,7 @@ interface PendingUpdate {
   readonly turnId: number;
   readonly step: number;
   readonly time: number;
+  readonly title?: string;
   readonly text: string;
 }
 
@@ -117,6 +118,7 @@ export class NotifyController {
         break;
       case 'subagent.completed':
       case 'subagent.failed':
+      case 'subagent.cancelled':
         this.running.delete(event.subagentId);
         this.dropPending(event.subagentId);
         break;
@@ -200,13 +202,16 @@ export class NotifyController {
         const key = JSON.stringify([agentId, event.turnId, event.toolCallId]);
         if (this.settled.has(key)) return;
         if (event.name !== 'NotifyUser') return;
-        const message = argsRecord(event.args)['message'];
+        const args = argsRecord(event.args);
+        const message = args['message'];
         if (typeof message !== 'string' || message.trim().length === 0) return;
+        const title = typeof args['title'] === 'string' ? args['title'].trim() : '';
         this.pending.set(key, {
           agentId,
           turnId: event.turnId,
           step: this.steps.get(agentId) ?? 0,
           time: Date.now(),
+          title: title.length > 0 ? title : undefined,
           text: message,
         });
         break;
@@ -236,6 +241,7 @@ export class NotifyController {
             agentId,
             agentName: this.agentNames.get(agentId),
             time: update.time,
+            title: update.title,
             text: update.text,
           };
           this.state.notifyPanel.upsert(entry);

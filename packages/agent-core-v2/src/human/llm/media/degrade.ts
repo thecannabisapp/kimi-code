@@ -72,26 +72,31 @@ const MEDIA_RECOVERY_ID = 'media-degrade';
 
 export function createMediaDegradeRecovery(): LlmRecovery {
   return {
-    id: MEDIA_RECOVERY_ID,
-    propose: ({ error, messages, applied }) => {
+    propose: ({ error, messages, appliedRecoveries }) => {
       const done = new Set(
-        applied.filter((r) => r.strategy === MEDIA_RECOVERY_ID).map((r) => r.action),
+        appliedRecoveries.filter((r) => r.strategy === MEDIA_RECOVERY_ID).map((r) => r.action),
       );
       if (error.kind === 'image_format') {
         if (!done.has('stripped')) {
           const stripped = stripMediaParts(messages);
-          if (stripped !== messages) return { action: 'stripped', messages: stripped };
+          if (stripped !== messages) {
+            return { strategy: MEDIA_RECOVERY_ID, action: 'stripped', attemptMessageOverride: stripped };
+          }
         }
         return undefined;
       }
       if (error.kind !== 'request_too_large') return undefined;
       if (!done.has('degraded')) {
         const degraded = degradeOlderMediaParts(messages, MEDIA_DEGRADE_KEEP_RECENT);
-        if (degraded !== messages) return { action: 'degraded', messages: degraded };
+        if (degraded !== messages) {
+          return { strategy: MEDIA_RECOVERY_ID, action: 'degraded', attemptMessageOverride: degraded };
+        }
       }
       if (!done.has('stripped')) {
         const stripped = stripMediaParts(messages);
-        if (stripped !== messages) return { action: 'stripped', messages: stripped };
+        if (stripped !== messages) {
+          return { strategy: MEDIA_RECOVERY_ID, action: 'stripped', attemptMessageOverride: stripped };
+        }
       }
       return undefined;
     },

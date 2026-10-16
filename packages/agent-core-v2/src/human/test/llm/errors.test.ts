@@ -10,7 +10,7 @@ import { UNKNOWN_CAPABILITY } from '#/llm/capability';
 import { createAssistantMessage, createUserMessage, type Message } from '#/llm/message';
 import type { LlmModel } from '#/llm/model';
 import { classifyKimiQuotaError } from '#/llm-kimi/errors';
-import { kimiOpenAITrait } from '#/llm-kimi/trait';
+import { kimiConnection, kimiOpenAITrait } from '#/llm-kimi/trait';
 import { createGoogleGenAIRequester } from '#/llm/requester/bases/google-genai/requester';
 import { convertOpenAIError } from '#/llm/requester/bases/openai/format';
 import { createOpenAIRequester } from '#/llm/requester/bases/openai/requester';
@@ -87,17 +87,17 @@ describe('convertOpenAIError', () => {
     expect(convertOpenAIError(raw)).toMatchObject({ kind: 'context_overflow', statusCode: 400 });
   });
 
-  it('maps 413 too-large messages to request_too_large', () => {
-    const raw = new RawOpenAISDKAPIError(
+  it('maps remaining status errors to their kinds', () => {
+    const tooLarge = new RawOpenAISDKAPIError(
       413,
       { message: 'request entity too large' },
       undefined,
       new Headers(),
     );
-    expect(convertOpenAIError(raw)).toMatchObject({ kind: 'request_too_large', statusCode: 413 });
-  });
-
-  it('maps remaining status errors to their kinds', () => {
+    expect(convertOpenAIError(tooLarge)).toMatchObject({
+      kind: 'request_too_large',
+      statusCode: 413,
+    });
     const overloaded = new RawOpenAISDKAPIError(529, {}, 'overloaded', new Headers());
     expect(convertOpenAIError(overloaded)).toMatchObject({ kind: 'overloaded', statusCode: 529 });
     const generic = new RawOpenAISDKAPIError(500, {}, 'server error', new Headers());
@@ -273,7 +273,7 @@ describe('requester error conversion', () => {
   }
 
   it('converts a 429 response to rate_limit', async () => {
-    const requester = createOpenAIRequester(undefined, {
+    const requester = createOpenAIRequester({
       clientFactory: failingOpenAIClient(
         new RawOpenAISDKAPIError(
           429,
@@ -291,7 +291,10 @@ describe('requester error conversion', () => {
   });
 
   it('converts a kimi quota response to quota_exhausted', async () => {
-    const requester = createOpenAIRequester(kimiOpenAITrait, {
+    const requester = createOpenAIRequester({
+      connection: kimiConnection,
+      trait: kimiOpenAITrait,
+      classifyError: classifyKimiQuotaError,
       clientFactory: failingOpenAIClient(
         new RawOpenAISDKAPIError(
           429,
@@ -310,7 +313,7 @@ describe('requester error conversion', () => {
 
   it('emits llm.failed.syntax for a local message syntax error without sending a request', async () => {
     const clientFactory = vi.fn(() => ({}) as never);
-    const requester = createGoogleGenAIRequester(undefined, { clientFactory });
+    const requester = createGoogleGenAIRequester({ clientFactory });
     const events = await generateEvents(requester, [
       createAssistantMessage([], [
         { type: 'function', id: 'call-1', name: 'some_tool', arguments: 'not json' },

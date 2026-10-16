@@ -44,7 +44,6 @@ export interface CLIOptions {
   outputFormat: PromptOutputFormat | undefined;
   prompt: string | undefined;
   skillsDirs: string[];
-  agentsDir?: string | undefined;
   agent: string | undefined;
   agentFiles: string[];
   addDirs?: string[];

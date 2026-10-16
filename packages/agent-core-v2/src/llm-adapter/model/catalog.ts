@@ -3,35 +3,19 @@ import { z } from 'zod';
 import { createDecorator, type ServiceIdentifier } from '#/_base/di/instantiation';
 
 import type { ModelCapability } from '../contract/capability';
+import type { LlmCredentialProvider } from '#human/llm/requester/requester';
 import type { TokenUsage } from '#human/llm/usage';
 import type { Protocol, ProtocolProviderOptions } from '../protocol/protocol';
 import type { ProviderConfig } from '../provider/provider';
 
-import type { ModelInspection } from './inspection';
 import type { ModelRecord } from './model';
 import { effectiveModelConfig } from './model-auth';
-import type { ModelRequester } from './model-requester';
-
-export interface ProviderRequestAuth {
-  apiKey?: string;
-  headers?: Record<string, string>;
-}
-
-export interface AuthProvider {
-  readonly canRefresh?: boolean;
-
-  getAuth(options?: { readonly force?: boolean }): Promise<ProviderRequestAuth | undefined>;
-}
-
-export class StaticAuthProvider implements AuthProvider {
-  readonly canRefresh = false;
-
-  constructor(private readonly apiKey: string | undefined) {}
-  async getAuth(): Promise<ProviderRequestAuth | undefined> {
-    if (this.apiKey === undefined || this.apiKey.trim().length === 0) return undefined;
-    return { apiKey: this.apiKey };
-  }
-}
+import type {
+  ModelRequestEvent,
+  ModelRequestInput,
+  ModelRequestParams,
+  ModelRequester,
+} from './model-requester';
 
 export interface Model {
   readonly id: string;
@@ -50,10 +34,11 @@ export interface Model {
   readonly supportEfforts?: readonly string[];
   readonly defaultEffort?: string;
   readonly alwaysThinking: boolean;
+  readonly adaptiveThinking?: boolean;
   readonly providerType?: string;
   readonly providerName: string;
 
-  readonly authProvider: AuthProvider;
+  readonly credentialProvider?: LlmCredentialProvider;
   readonly providerOptions?: ProtocolProviderOptions;
 }
 
@@ -89,6 +74,7 @@ export const providerCatalogItemSchema = z.object({
   type: z.string().min(1),
   base_url: z.string().min(1).optional(),
   default_model: z.string().min(1).optional(),
+  api_key_env: z.string().optional(),
   has_api_key: z.boolean(),
   status: providerCatalogStatusSchema,
   models: z.array(z.string().min(1)).optional(),
@@ -104,6 +90,7 @@ export type SetDefaultModelResponse = z.infer<typeof setDefaultModelResponseSche
 export interface ProviderCredentialState {
   readonly hasApiKey: boolean;
   readonly hasOAuthToken: boolean;
+  readonly hasCredentialConflict: boolean;
 }
 
 export function toProtocolModel(
@@ -154,8 +141,13 @@ export function toProtocolProvider(
     type: provider.type ?? 'openai',
     base_url: provider.baseUrl,
     default_model: defaultModel,
+    api_key_env: provider.apiKeyEnv,
     has_api_key: credential.hasApiKey,
-    status: credential.hasApiKey || credential.hasOAuthToken ? 'connected' : 'unconfigured',
+    status: credential.hasCredentialConflict
+      ? 'error'
+      : credential.hasApiKey || credential.hasOAuthToken
+        ? 'connected'
+        : 'unconfigured',
     models: providerModels,
   };
 }
@@ -184,7 +176,12 @@ export interface IModelCatalog {
 
   get(id: string): Model;
   getRequester(id: string): ModelRequester;
-  inspect(id: string): ModelInspection;
+  generate(
+    id: string,
+    input: ModelRequestInput,
+    signal?: AbortSignal,
+    params?: ModelRequestParams,
+  ): AsyncIterable<ModelRequestEvent>;
   ping(id: string): Promise<ModelPingResult>;
   findByName(name: string): readonly string[];
 

@@ -22,6 +22,7 @@ export interface ToolCallStartedPayload {
 
 export interface ToolExecutorExecuteOptions {
   readonly signal: AbortSignal;
+  readonly steerSignal?: AbortSignal;
   readonly turnId: number;
   readonly trace?: LLMRequestTrace;
   readonly onToolCall?: (payload: ToolCallStartedPayload) => void;
@@ -31,6 +32,7 @@ export interface ToolExecutionResult {
   readonly toolCallId: string;
   readonly toolName: string;
   readonly result: ToolResult;
+  readonly durationMs: number;
 }
 
 export type MissingToolDescriber = (toolName: string) => string | undefined;

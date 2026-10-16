@@ -27,6 +27,7 @@ import {
 } from '#/llm-adapter/contract/errors';
 import type { Message } from '#/llm-adapter/contract/message';
 import { type ThinkingEffort } from '#human/llm/thinking';
+import type { LlmCredentialProvider } from '#human/llm/requester/requester';
 import { isToolCall, type StreamedMessagePart, type ToolDescription as Tool } from '#human/llm/message';
 import { emptyUsage, inputTotal, type TokenUsage } from '#human/llm/usage';
 import { ILogService, type LogContext } from '#/_base/log/log';
@@ -61,6 +62,7 @@ import {
   type AgentLLMRequestPartHandler,
   type AgentLLMRequestSource,
   type AgentLLMRequestTask,
+  type AgentLLMTurnRequestSnapshot,
   type PreparedTurnRequestConfig,
 } from './llmRequester';
 import type { LLMRequestTrace } from '#/llm-adapter/contract/request-trace';
@@ -104,6 +106,7 @@ interface ResolvedLLMRequest {
   readonly systemPrompt: string;
   readonly tools: readonly Tool[];
   readonly messages: Message[];
+  readonly contextRevision: number;
   readonly source: AgentLLMRequestSource | undefined;
   readonly logFields: AgentLLMRequestLogFields;
 }
@@ -147,6 +150,10 @@ export const llmRequesterEmittedThinkingEffortWarningsKey = defineState<Set<stri
   'llmRequester.emittedThinkingEffortWarnings',
   () => new Set(),
 );
+export const llmRequesterLastTurnRequestKey = defineState<AgentLLMTurnRequestSnapshot | undefined>(
+  'llmRequester.lastTurnRequest',
+  () => undefined as AgentLLMTurnRequestSnapshot | undefined,
+);
 
 export class AgentLLMRequesterService implements IAgentLLMRequesterService {
   declare readonly _serviceBrand: undefined;
@@ -178,6 +185,7 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
     this.states.contributeState(llmRequesterMediaDegradedTurnsKey);
     this.states.contributeState(llmRequesterMediaStrippedTurnsKey);
     this.states.contributeState(llmRequesterEmittedThinkingEffortWarningsKey);
+    this.states.contributeState(llmRequesterLastTurnRequestKey);
   }
 
   private get lastConfigLogSignature(): string | undefined {
@@ -208,6 +216,21 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
     if (!this.profile.hasProvider()) return undefined;
     const config = this.getOrCreateTurnConfig(turnId);
     return { thinkingEffort: config.resolved.thinkingLevel };
+  }
+
+  currentCredentialProvider(): LlmCredentialProvider | undefined {
+    if (!this.profile.hasProvider()) return undefined;
+    return this.modelCatalog.get(this.profile.resolveModelContext().modelAlias).credentialProvider;
+  }
+
+  credentialProviderForTurn(turnId: number): LlmCredentialProvider | undefined {
+    if (!this.profile.hasProvider()) return undefined;
+    const resolved = this.turnConfigs.get(turnId)?.resolved ?? this.profile.resolveModelContext();
+    return this.modelCatalog.get(resolved.modelAlias).credentialProvider;
+  }
+
+  lastTurnRequest(): AgentLLMTurnRequestSnapshot | undefined {
+    return this.states.get(llmRequesterLastTurnRequestKey);
   }
 
   async request(
@@ -251,6 +274,7 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
         onPart,
         signal,
         setTrace,
+        overrides.onAttemptRetry,
       );
     } catch (error) {
       this.logRequestFailure(error, overrides, signal);
@@ -323,6 +347,7 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
     onPart: AgentLLMRequestPartHandler,
     signal: AbortSignal | undefined,
     onRequestTrace: (traceId: string | undefined) => void,
+    onAttemptRetry: (() => void) | undefined,
   ): Promise<AgentLLMRequestFinish> {
     this.toolCallIdNormalizer.seedFrom(this.context.get());
     const shaped = this.toolSelect.shapeHistory(request.messages);
@@ -338,6 +363,9 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
       this.markMediaStrippedRecoveryTurn(snapshot, request.source);
       return { strip: snapshot };
     };
+    let previousMediaCount: number | undefined;
+    let previousMediaPolicy: ProjectionPolicy['media'];
+    let mediaPaths: ReadonlyMap<string, string> | undefined;
     const run = async (
       policy: ProjectionPolicy | undefined,
     ): Promise<AgentLLMRequestFinish> => {
@@ -345,15 +373,43 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
       const projection = projectionNameOf(policy);
       const fields =
         projection === undefined ? request.logFields : { ...request.logFields, projection };
+      if (policy?.media !== undefined) {
+        mediaPaths ??= await this.mediaResolver.displayPaths(shaped);
+      }
+      const projected = this.projector.project(shaped, policy, mediaPaths);
+      const currentMediaCount = mediaPartCount(projected);
+      const mediaPolicyChanged =
+        previousMediaCount !== undefined && previousMediaPolicy !== policy?.media;
+      const droppedMediaCount =
+        previousMediaCount === undefined ? 0 : previousMediaCount - currentMediaCount;
+      previousMediaCount = currentMediaCount;
+      previousMediaPolicy = policy?.media;
       const input = {
         systemPrompt: request.systemPrompt,
         tools: request.tools,
-        messages: await this.mediaResolver.resolve(
-          this.projector.project(shaped, policy),
-          request.requester,
-          signal,
-        ),
+        messages: await this.mediaResolver.resolve(projected, request.requester, signal),
       };
+      const mediaProjection =
+        projection === 'media-degraded' || projection === 'strict-media-degraded'
+          ? 'media-degraded'
+          : projection === 'media-stripped' || projection === 'strict-media-stripped'
+            ? 'media-stripped'
+            : undefined;
+      if (mediaPolicyChanged && droppedMediaCount > 0 && mediaProjection !== undefined) {
+        try {
+          void this.dispatcher.dispatch(
+            new WarningIssued({
+              agentId: this.scopeContext.agentId,
+              code: mediaProjection,
+              message:
+                mediaProjection === 'media-degraded'
+                  ? 'Provider rejected the request as too large; older media were dropped and the request was retried.'
+                  : 'Provider rejected the media in the request; all media were omitted and the request was retried.',
+            }),
+          );
+        } catch {
+        }
+      }
       this.warnAboutAnthropicThinkingEffort(request);
       const logInput: LLMRequestLogInput = {
         protocol: request.model.protocol,
@@ -368,7 +424,8 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
         fields,
       };
       this.logRequest(logInput);
-      this.recordRequest(logInput);
+      const recorded = this.recordRequest(logInput);
+      const startedAt = Date.now();
 
       let message: Message | undefined;
       let usage: TokenUsage | undefined;
@@ -429,6 +486,17 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
         throw error;
       }
 
+      if (request.source?.type === 'turn') {
+        this.states.set(llmRequesterLastTurnRequestKey, {
+          modelAlias: request.modelAlias,
+          contextRevision: request.contextRevision,
+          toolsHash: recorded.toolsHash,
+          systemPromptHash: recorded.systemPromptHash,
+          inputTokens: usage === undefined ? undefined : inputTotal(usage),
+          startedAt,
+          finishedAt: Date.now(),
+        });
+      }
       void this.usage.record(
         this.scopeContext.agentContext,
         request.modelAlias,
@@ -465,6 +533,7 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
           captureMediaStripPolicy,
         );
         if (nextPolicy !== undefined) {
+          onAttemptRetry?.();
           policy = nextPolicy;
           continue;
         }
@@ -488,6 +557,7 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
           delayMs,
           ...retryErrorFields(error),
         });
+        onAttemptRetry?.();
         await sleepForRetry(delayMs, signal);
       }
     }
@@ -644,31 +714,39 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
     const turnConfig = this.resolveTurnConfig(overrides.source);
     const resolved = turnConfig?.resolved ?? this.profile.resolveModelContext();
     const baseParams = turnConfig?.params ?? this.profile.resolveRequestParams();
+    const requester = this.modelCatalog.getRequester(resolved.modelAlias);
+    const maxCompletionTokensCap =
+      this.config.get<ModelOverrides>('modelOverrides')?.maxCompletionTokens;
+    const usedContextTokens =
+      overrides.messages === undefined
+        ? this.tokenCounting.get(this.scopeContext.agentContext).size
+        : undefined;
     const budgetParams = completionBudgetParams({
       budget: resolveCompletionBudget({
         maxOutputSize: overrides.maxOutputSize ?? resolved.maxOutputSize,
-        reservedContextSize: resolved.reservedContextSize,
-        maxCompletionTokensCap:
-          this.config.get<ModelOverrides>('modelOverrides')?.maxCompletionTokens,
+        maxCompletionTokensCap,
       }),
       capability: resolved.modelCapabilities,
-      usedContextTokens:
-        overrides.messages === undefined
-          ? this.tokenCounting.get(this.scopeContext.agentContext).measured
-          : undefined,
+      usedContextTokens,
     });
-    const requester = this.modelCatalog.getRequester(resolved.modelAlias);
+    const optedOut = maxCompletionTokensCap !== undefined && maxCompletionTokensCap <= 0;
 
     const messages = overrides.messages ?? this.context.get();
     return {
       requester,
       model: requester.model,
-      params: { ...baseParams, ...budgetParams },
+      params: {
+        ...baseParams,
+        ...budgetParams,
+        ...(usedContextTokens === undefined ? {} : { usedContextTokens }),
+        ...(optedOut ? { maxCompletionTokens: maxCompletionTokensCap } : {}),
+      },
       modelAlias: resolved.modelAlias,
       thinkingEffort: resolved.thinkingLevel,
       systemPrompt: overrides.systemPrompt ?? turnConfig?.systemPrompt ?? this.profile.getSystemPrompt(),
       tools: [...(overrides.tools ?? this.defaultTools())],
       messages: [...messages],
+      contextRevision: this.context.prefixRevision(),
       source: overrides.source,
       logFields: logFieldsForSource(overrides.source),
     };
@@ -722,7 +800,7 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
     this.log.info('llm request', requestFields);
   }
 
-  private recordRequest(input: LLMRequestLogInput): void {
+  private recordRequest(input: LLMRequestLogInput): LlmRequestPayload {
     const fields = input.fields ?? {};
     const wireTools = providerVisibleTools(input.tools);
     const tools = toolSignature(wireTools);
@@ -768,6 +846,7 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
       droppedCount: numberField(fields, 'droppedCount'),
     };
     void this.dispatcher.dispatch(new LlmRequest(payload));
+    return payload;
   }
 
   private logResponse(
@@ -860,6 +939,18 @@ function stringField(fields: AgentLLMRequestLogFields, key: string): string | un
 function numberField(fields: AgentLLMRequestLogFields, key: string): number | undefined {
   const value = fields[key];
   return typeof value === 'number' ? value : undefined;
+}
+
+function mediaPartCount(messages: readonly Message[]): number {
+  return messages.reduce(
+    (count, message) =>
+      count +
+      message.content.filter(
+        (part) =>
+          part.type === 'image_url' || part.type === 'audio_url' || part.type === 'video_url',
+      ).length,
+    0,
+  );
 }
 
 type LlmRequestProjection = NonNullable<LlmRequestPayload['projection']>;

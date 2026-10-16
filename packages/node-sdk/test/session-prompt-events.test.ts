@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -121,7 +121,10 @@ describe('Session.prompt events', () => {
                       type: 'function',
                       function: {
                         name: 'NotifyUser',
-                        arguments: JSON.stringify({ message: 'Checking the work.' }),
+                        arguments: JSON.stringify({
+                          title: 'Checking the work',
+                          message: 'Reviewing the changed files.',
+                        }),
                       },
                     },
                   ],
@@ -534,8 +537,49 @@ describe('Session.prompt events', () => {
       await harness.closeSession(session.id);
       const resumed = await harness.resumeSession({ id: session.id });
       const resumeState = resumed.getResumeState();
-      expect(resumeState?.agents).toMatchObject({ main: expect.any(Object) });
+      expect(resumeState?.agents).toMatchObject({ main: { userTurnCount: 1 } });
       expect(resumeState?.agents).not.toHaveProperty(agentId);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it('preserves started user turns through resume, undo, compaction and reload', async () => {
+    const homeDir = await makeTempDir();
+    const workDir = await makeTempDir();
+    const harness = createKimiHarness({ identity: TEST_IDENTITY, homeDir });
+
+    try {
+      await configureFakeProvider(harness);
+      const source = await harness.createSession({ id: 'ses_user_turn_count', workDir });
+      await runPrompt(source, 'first question', 'first answer');
+      await runPrompt(source, 'second question', 'second answer');
+      await runPrompt(source, 'third question', 'third answer');
+      await source.undoHistory(1);
+      await source.close();
+
+      const resumed = await harness.resumeSession({ id: source.id, replayTurnLimit: 1 });
+      expect(resumed.getResumeState()?.agents['main']).toMatchObject({ userTurnCount: 3 });
+      expect(visibleReplayText(resumed.getResumeState()?.agents['main']?.replay ?? [])).toEqual([
+        'user:second question',
+        'assistant:second answer',
+      ]);
+
+      const snapshot = resumed.getResumeState()!;
+      const { userTurnCount, ...legacyMain } = snapshot.agents['main']!;
+      const legacySnapshot: typeof snapshot = {
+        ...snapshot,
+        agents: { ...snapshot.agents, main: legacyMain },
+      };
+      expect(userTurnCount).toBe(3);
+      expect(legacySnapshot.agents['main']?.userTurnCount).toBeUndefined();
+
+      await resumed.compact();
+      const compacted = await harness.reloadSession({ id: source.id });
+      expect(compacted.getResumeState()?.agents['main']).toMatchObject({ userTurnCount: 3 });
+      await runPrompt(compacted, 'follow-up question', 'follow-up answer');
+      const reloaded = await harness.reloadSession({ id: source.id });
+      expect(reloaded.getResumeState()?.agents['main']).toMatchObject({ userTurnCount: 4 });
     } finally {
       await harness.close();
     }
@@ -553,6 +597,10 @@ describe('Session.prompt events', () => {
       await runPrompt(source, 'second question', 'second answer');
       await runPrompt(source, 'third question', 'third answer');
 
+      const fullFork = await harness.forkSession({ id: source.id });
+      expect(fullFork.getResumeState()?.agents['main']).toMatchObject({ userTurnCount: 3 });
+      await fullFork.close();
+
       const fork = await harness.forkSession({
         id: source.id,
         forkId: 'ses_turn_fork_child',
@@ -561,6 +609,7 @@ describe('Session.prompt events', () => {
       await fork.close();
       const resumed = await harness.resumeSession({ id: fork.id });
       const replayText = visibleReplayText(resumed.getResumeState()?.agents['main']?.replay ?? []);
+      expect(resumed.getResumeState()?.agents['main']).toMatchObject({ userTurnCount: 2 });
 
       expect(replayText).toEqual([
         'user:first question',
@@ -568,12 +617,15 @@ describe('Session.prompt events', () => {
         'user:second question',
         'assistant:second answer',
       ]);
+      await runPrompt(resumed, 'fork follow-up', 'fork answer');
+      const reloaded = await harness.reloadSession({ id: fork.id });
+      expect(reloaded.getResumeState()?.agents['main']).toMatchObject({ userTurnCount: 3 });
     } finally {
       await harness.close();
     }
   });
 
-  it('returns the requested identity for a historical fork', async () => {
+  it('returns the requested identity and derives metadata from the selected historical turn', async () => {
     const homeDir = await makeTempDir();
     const workDir = await makeTempDir();
     const harness = createKimiHarness({ identity: TEST_IDENTITY, homeDir });
@@ -600,44 +652,81 @@ describe('Session.prompt events', () => {
       expect(fork.id).toBe('ses_turn_fork_metadata_child');
       expect(fork.workDir).toBe(source.workDir);
       expect(state?.sessionMetadata.forkedFrom).toBe(source.id);
+      expect(fork.summary).toMatchObject({
+        title: 'Historical branch',
+        lastPrompt: 'branch here',
+        metadata: { source: 'vscode', branch: 'historical' },
+      });
+      expect(state?.sessionMetadata).toMatchObject({
+        title: 'Historical branch',
+        lastPrompt: 'branch here',
+        custom: { source: 'vscode', branch: 'historical' },
+      });
     } finally {
       await harness.close();
     }
   });
 
-  it('derives historical fork metadata from the selected turn', async () => {
+  it('flattens the undo branch out of a turn-sliced fork', async () => {
     const homeDir = await makeTempDir();
     const workDir = await makeTempDir();
     const harness = createKimiHarness({ identity: TEST_IDENTITY, homeDir });
 
     try {
       await configureFakeProvider(harness);
-      const source = await harness.createSession({
-        id: 'ses_turn_fork_state_source',
-        workDir,
-        metadata: { source: 'vscode' },
-      });
-      await runPrompt(source, 'branch here', 'kept answer');
-      await runPrompt(source, 'future prompt', 'discarded answer');
+      const source = await harness.createSession({ id: 'ses_turn_fork_undo_source', workDir });
+      await runPrompt(source, 'kept prompt one', 'kept answer one');
+      await runPrompt(source, 'kept prompt two', 'kept answer two');
+      await runPrompt(source, 'retracted prompt', 'retracted answer');
+      await source.undoHistory(1);
+      await runPrompt(source, 'follow-up prompt', 'follow-up answer');
 
       const fork = await harness.forkSession({
         id: source.id,
-        forkId: 'ses_turn_fork_state_child',
-        title: 'Historical branch',
-        metadata: { branch: 'historical' },
-        turnIndex: 0,
+        forkId: 'ses_turn_fork_undo_child',
+        turnIndex: 2,
       });
+      await fork.close();
+      const resumed = await harness.resumeSession({ id: fork.id });
+      const replayText = visibleReplayText(resumed.getResumeState()?.agents['main']?.replay ?? []);
 
-      expect(fork.summary).toMatchObject({
-        title: 'Historical branch',
-        lastPrompt: 'branch here',
-        metadata: { source: 'vscode', branch: 'historical' },
-      });
-      expect(fork.getResumeState()?.sessionMetadata).toMatchObject({
-        title: 'Historical branch',
-        lastPrompt: 'branch here',
-        custom: { source: 'vscode', branch: 'historical' },
-      });
+      expect(replayText).toEqual([
+        'user:kept prompt one',
+        'assistant:kept answer one',
+        'user:kept prompt two',
+        'assistant:kept answer two',
+        'user:follow-up prompt',
+        'assistant:follow-up answer',
+      ]);
+
+      const wireFiles = (await readdir(homeDir, { recursive: true })).filter((path) =>
+        path.endsWith(join('agents', 'main', 'wire.jsonl')),
+      );
+      const forkedLines = (await readFile(
+        join(homeDir, wireFiles.find((path) => path.includes(fork.id))!),
+        'utf8',
+      ))
+        .trimEnd()
+        .split('\n');
+      const types = forkedLines.map((line) => (JSON.parse(line) as { type: string }).type);
+      expect(types).not.toContain('agent.switched');
+      expect(types).not.toContain('context.undo');
+      expect(types).not.toContain('context.undone');
+
+      const sourceLines = (await readFile(
+        join(homeDir, wireFiles.find((path) => path.includes(source.id))!),
+        'utf8',
+      ))
+        .trimEnd()
+        .split('\n');
+      const sourceTypes = sourceLines.map((line) => (JSON.parse(line) as { type: string }).type);
+      expect(sourceTypes).toContain('agent.switched');
+      expect(sourceLines.some((line) => line.includes('retracted'))).toBe(true);
+
+      const retractedTypes = forkedLines
+        .filter((line) => line.includes('retracted'))
+        .map((line) => (JSON.parse(line) as { type: string }).type);
+      expect(retractedTypes).toEqual([]);
     } finally {
       await harness.close();
     }

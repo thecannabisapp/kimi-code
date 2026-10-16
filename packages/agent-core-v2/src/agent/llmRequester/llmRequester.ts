@@ -1,5 +1,6 @@
 import { createDecorator } from '#/_base/di/instantiation';
 import type { FinishReason } from '#human/llm/finish-reason';
+import type { LlmCredentialProvider } from '#human/llm/requester/requester';
 import type { ThinkingEffort } from '#human/llm/thinking';
 import type { Message } from '#/llm-adapter/contract/message';
 import type { StreamedMessagePart, ToolDescription as Tool } from '#human/llm/message';
@@ -43,6 +44,7 @@ export interface AgentLLMRequestOverrides {
   systemPrompt?: string;
   source?: AgentLLMRequestSource;
   maxOutputSize?: number;
+  onAttemptRetry?: () => void;
 }
 
 export interface AgentLLMRequestTask {
@@ -54,10 +56,26 @@ export interface PreparedTurnRequestConfig {
   readonly thinkingEffort: ThinkingEffort;
 }
 
+export interface AgentLLMTurnRequestSnapshot {
+  readonly modelAlias: string;
+  readonly contextRevision: number;
+  readonly toolsHash: string;
+  readonly systemPromptHash: string;
+  readonly inputTokens?: number;
+  readonly startedAt: number;
+  readonly finishedAt: number;
+}
+
 export interface IAgentLLMRequesterService {
   readonly _serviceBrand: undefined;
 
   prepareTurnConfig(turnId: number): PreparedTurnRequestConfig | undefined;
+
+  currentCredentialProvider(): LlmCredentialProvider | undefined;
+
+  credentialProviderForTurn(turnId: number): LlmCredentialProvider | undefined;
+
+  lastTurnRequest(): AgentLLMTurnRequestSnapshot | undefined;
 
   request(
     overrides?: AgentLLMRequestOverrides,

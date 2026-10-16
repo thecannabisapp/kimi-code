@@ -39,9 +39,6 @@ export const emptyPayloadSchema = z.object({});
 
 export const promptPayloadSchema = z.object({
   input: z.array(promptPartSchema),
-  // Mirrors `PromptPayload.disabledTools` in the engine (client-managed
-  // session denylist, full-replace).
-  disabledTools: z.array(z.string()).optional(),
   // Mirrors `PromptPayload.promptId` in the engine (client-chosen prompt
   // record id, echoed on the consuming turn's `turn.started`).
   promptId: z.string().min(1).optional(),
@@ -56,6 +53,7 @@ export const promptSkillActivationSchema = z.object({
 /** Same shape as `PromptWithSkillsInput` in the engine. */
 export const promptWithSkillsPayloadSchema = promptPayloadSchema.extend({
   skills: z.array(promptSkillActivationSchema).min(1),
+  steerIfActive: z.boolean().optional(),
 });
 
 /** Same shape as `PromptWithSkillsResult` in the engine. */

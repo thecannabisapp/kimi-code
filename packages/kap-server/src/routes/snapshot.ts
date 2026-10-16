@@ -1,6 +1,6 @@
 import {
-  IAgentPromptService,
   INTERACTION_TAG_SESSION_ID,
+  IAgentLoopService,
   ISessionContext,
   ISessionMetadata,
   IWorkspaceService,
@@ -27,7 +27,7 @@ import {
 } from '../services/legacyStatus/legacyStatus';
 import { loadMessageHistory } from '../services/messages/messageHistory';
 import { type SessionEventBroadcaster } from '../transport/ws/v1/sessionEventBroadcaster';
-import { toWireApproval } from './approvals';
+import { interactionAgentId, toWireApproval } from './approvals';
 import { toWireQuestion } from '../protocol/question-wire';
 import { resolveSessionFacts, toWireSession } from './sessions';
 
@@ -143,7 +143,7 @@ async function assembleSnapshot(
       resolved: false,
       tags: { [INTERACTION_TAG_SESSION_ID]: sessionId },
     })
-    .map((i) => toWireQuestion(i, sessionId));
+    .map((i) => toWireQuestion(i, sessionId, interactionAgentId(i)));
 
   return {
     as_of_seq: snapState.seq,
@@ -160,7 +160,7 @@ async function assembleSnapshot(
 function readCurrentPromptId(main: IAgentScopeHandle | undefined): string | undefined {
   if (main === undefined) return undefined;
   try {
-    return main.accessor.get(IAgentPromptService).list().active?.id;
+    return main.accessor.get(IAgentLoopService).snapshot().activePromptId;
   } catch {
     return undefined;
   }

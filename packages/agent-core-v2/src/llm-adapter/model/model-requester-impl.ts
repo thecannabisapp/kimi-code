@@ -6,12 +6,12 @@ import { AsyncEventQueue } from '#/_base/asyncEventQueue';
 import type { LlmErrorMessage } from '#human/llm/errors';
 import { emptyResponseError } from '#human/llm/empty-response';
 import { NO_FINISH, type FinishInfo } from '#human/llm/finish-reason';
-import type { ProviderMediaContribution, VideoUploadInput } from '#human/llm/media/upload';
-import { createMessageAccumulator, type VideoURLPart } from '#human/llm/message';
+import type { ProviderMediaContribution, ImageUploadInput, VideoUploadInput } from '#human/llm/media/upload';
+import { createMessageAccumulator, type ImageURLPart, type VideoURLPart } from '#human/llm/message';
 import type { LlmModel } from '#human/llm/model';
 import type { ProtocolName } from '#human/llm/protocol/base';
+import { applyCredential } from '#human/credentials/credentials';
 import {
-  mergeRequestHeaders,
   type ExtraParams,
   type LlmRequestConfig,
   type LlmRequestContent,
@@ -19,17 +19,12 @@ import {
   type LlmRequester,
 } from '#human/llm/requester/requester';
 import type { TokenUsage } from '#human/llm/usage';
-import {
-  withAuth,
-  withAuthUpload,
-  type CredentialSource,
-} from '#human/kimi-oauth/credential-source';
 
 import {
   ChatProviderError,
   errorFromLlmMessage,
+  ImageUploadUnsupportedError,
   isAbortError,
-  isUnauthorizedLlmError,
   llmMessageFromError,
   traceIdFromHeadersRecord,
   VideoUploadUnsupportedError,
@@ -37,7 +32,7 @@ import {
 import { fromLlmAssistantMessage, toLlmMessage, type Tool } from '../contract/message';
 import { mergeUsagePatch } from '#human/llm/usage';
 
-import type { Model, ProviderRequestAuth } from './catalog';
+import type { Model } from './catalog';
 import type {
   ModelRequestEvent,
   ModelRequestInput,
@@ -83,19 +78,10 @@ export class ModelRequesterImpl implements ModelRequester {
 
   private requesterFor(resolved: ResolvedLlmModel): LlmRequester {
     if (this.cachedRequester === undefined) {
-      this.cachedRequester = withAuth(throwToEvent(resolved.requester), this.credentialSource);
+      this.cachedRequester = throwToEvent(resolved.requester);
     }
     return this.cachedRequester;
   }
-
-  private readonly credentialSource: CredentialSource = {
-    resolve: async (model, options) => {
-      const auth = await this.model.authProvider.getAuth({ force: options?.force });
-      return applyAuth(model, auth);
-    },
-    canRecover: (_model, error) =>
-      this.model.authProvider.canRefresh === true && isUnauthorizedLlmError(error),
-  };
 
   request(
     input: ModelRequestInput,
@@ -122,8 +108,25 @@ export class ModelRequesterImpl implements ModelRequester {
       );
     }
     const video = typeof input === 'string' ? readVideoFile(input) : input;
-    const wrapped = withAuthUpload(uploader, this.credentialSource);
-    return wrapped(video, { model: resolved.model, signal: options?.signal });
+    const credential = await this.model.credentialProvider?.resolve();
+    const model = applyCredential(resolved.model, credential);
+    return uploader(video, { model, signal: options?.signal });
+  }
+
+  async uploadImage(
+    input: ImageUploadInput,
+    options?: { readonly signal?: AbortSignal },
+  ): Promise<ImageURLPart> {
+    const resolved = this.resolve();
+    const uploader = resolved.media?.uploadImage;
+    if (uploader === undefined) {
+      throw new ImageUploadUnsupportedError(
+        `Model "${this.model.id}" (protocol=${this.model.protocol}) does not support image upload`,
+      );
+    }
+    const credential = await this.model.credentialProvider?.resolve();
+    const model = applyCredential(resolved.model, credential);
+    return uploader(input, { model, signal: options?.signal });
   }
 
   private async runRequest(
@@ -172,71 +175,83 @@ export class ModelRequesterImpl implements ModelRequester {
       usedContextTokens: params?.usedContextTokens,
     };
 
-    await requester.generate(config, content, {
-      signal: signal ?? new AbortController().signal,
-      onEvent: (event: LlmRequestEvent) => {
-        switch (event.type) {
-          case 'llm.sent': {
-            const now = Date.now();
-            if (requestSentAt !== undefined) {
-              requestStartedAt = now;
+    const credential = await this.model.credentialProvider?.resolve();
+    await requester.generate(
+      { ...config, model: applyCredential(resolved.model, credential) },
+      content,
+      {
+        signal: signal ?? new AbortController().signal,
+        onEvent: (event: LlmRequestEvent) => {
+          switch (event.type) {
+            case 'llm.sent': {
+              const now = Date.now();
+              if (requestSentAt !== undefined) {
+                requestStartedAt = now;
+                accumulator = createMessageAccumulator();
+                usage = undefined;
+                finish = undefined;
+                messageId = undefined;
+              }
+              requestSentAt = now;
+              return;
+            }
+            case 'llm.streaming.headers': {
+              traceId = traceIdFromHeadersRecord(event.headers);
+              params?.onTraceId?.(traceId);
+              return;
+            }
+            case 'llm.streaming.part': {
+              const arrivedAt = Date.now();
+              if (firstChunkAt === undefined) {
+                firstChunkAt = arrivedAt;
+                decodeEluStart = performance.eventLoopUtilization();
+              } else {
+                serverDecodeMs += arrivedAt - lastResumeAt;
+              }
+              accumulator.push(event.part);
+              queue.push({ type: 'part', part: event.part });
+              lastResumeAt = Date.now();
+              clientConsumeMs += lastResumeAt - arrivedAt;
+              return;
+            }
+            case 'llm.streaming.usage': {
+              usage = mergeUsagePatch(usage, event.usage);
+              return;
+            }
+            case 'llm.streaming.finish': {
+              finish = event.finish;
+              return;
+            }
+            case 'llm.streaming.message_id': {
+              messageId = event.messageId;
+              return;
+            }
+            case 'llm.failed.syntax':
+            case 'llm.failed.remote': {
+              failed = event.error;
+              return;
+            }
+            case 'llm.request.retrying': {
               accumulator = createMessageAccumulator();
               usage = undefined;
               finish = undefined;
               messageId = undefined;
+              return;
             }
-            requestSentAt = now;
-            return;
-          }
-          case 'llm.streaming.headers': {
-            traceId = traceIdFromHeadersRecord(event.headers);
-            params?.onTraceId?.(traceId);
-            return;
-          }
-          case 'llm.streaming.part': {
-            const arrivedAt = Date.now();
-            if (firstChunkAt === undefined) {
-              firstChunkAt = arrivedAt;
-              decodeEluStart = performance.eventLoopUtilization();
-            } else {
-              serverDecodeMs += arrivedAt - lastResumeAt;
-            }
-            accumulator.push(event.part);
-            queue.push({ type: 'part', part: event.part });
-            lastResumeAt = Date.now();
-            clientConsumeMs += lastResumeAt - arrivedAt;
-            return;
-          }
-          case 'llm.streaming.usage': {
-            usage = mergeUsagePatch(usage, event.usage);
-            return;
-          }
-          case 'llm.streaming.finish': {
-            finish = event.finish;
-            return;
-          }
-          case 'llm.streaming.message_id': {
-            messageId = event.messageId;
-            return;
-          }
-          case 'llm.failed.syntax':
-          case 'llm.failed.remote': {
-            failed = event.error;
-            return;
-          }
-          case 'llm.done': {
-            streamEndedAt = Date.now();
-            if (firstChunkAt !== undefined) {
-              serverDecodeMs += streamEndedAt - lastResumeAt;
-              if (decodeEluStart !== undefined) {
-                decodeEluEnd = performance.eventLoopUtilization(decodeEluStart);
+            case 'llm.done': {
+              streamEndedAt = Date.now();
+              if (firstChunkAt !== undefined) {
+                serverDecodeMs += streamEndedAt - lastResumeAt;
+                if (decodeEluStart !== undefined) {
+                  decodeEluEnd = performance.eventLoopUtilization(decodeEluStart);
+                }
               }
+              return;
             }
-            return;
           }
-        }
+        },
       },
-    });
+    );
 
     if (failed !== undefined) {
       throw errorFromLlmMessage(failed);
@@ -290,15 +305,6 @@ function finalizeDecodeStats(
     serverDecodeMs: raw.serverDecodeMs,
     clientConsumeMs: raw.clientConsumeMs,
     clientBlockedMs: Math.max(0, Math.round(elu.active) - raw.clientConsumeMs),
-  };
-}
-
-function applyAuth(model: LlmModel, auth: ProviderRequestAuth | undefined): LlmModel {
-  if (auth === undefined) return model;
-  return {
-    ...model,
-    apiKey: auth.apiKey ?? model.apiKey,
-    defaultHeaders: mergeRequestHeaders(model.defaultHeaders, auth.headers),
   };
 }
 

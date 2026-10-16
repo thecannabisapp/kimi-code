@@ -14,7 +14,7 @@ const CONFIG_NAME = 'survey_popup';
  *  built-in defaults. */
 export interface SurveyPopupConfig {
   probability: number;
-  /** Model gate: exact match, `"*"` opens for every model, `[]` closes both arms. */
+  /** Model gate: exact match against the resolved managed (kimi-for-coding) model id, `"*"` opens for every model, `[]` closes both arms. */
   on_for_models: string[];
   min_time_before_feedback_ms: number;
   min_user_turns_before_feedback: number;
@@ -39,7 +39,18 @@ export const DEFAULT_SURVEY_POPUP_CONFIG: SurveyPopupConfig = {
   min_time_between_global_feedback_ms: 100_000_000,
   long_context_survey_threshold: 200_000,
   long_context_probability: 0.2,
-  long_context_trigger_mode: 'cumulative',
+  long_context_trigger_mode: 'virtual_context',
+};
+
+export type SurveyPopupOverride = Partial<Omit<SurveyPopupConfig, 'on_for_models'>>;
+
+export interface SurveyPopupPayload extends SurveyPopupConfig {
+  model_overrides: Record<string, SurveyPopupOverride>;
+}
+
+export const DEFAULT_SURVEY_POPUP_PAYLOAD: SurveyPopupPayload = {
+  ...DEFAULT_SURVEY_POPUP_CONFIG,
+  model_overrides: {},
 };
 
 const FIELD_SCHEMAS = {
@@ -55,7 +66,19 @@ const FIELD_SCHEMAS = {
   long_context_trigger_mode: z.enum(['cumulative', 'virtual_context']),
 } satisfies Record<keyof SurveyPopupConfig, z.ZodType>;
 
-const surveyPopupConfigSchema = z.unknown().transform((raw): Partial<SurveyPopupConfig> => {
+const surveyPopupOverrideSchema = z.object(FIELD_SCHEMAS).omit({ on_for_models: true }).partial();
+
+function parseModelOverrides(raw: unknown): Record<string, SurveyPopupOverride> {
+  if (typeof raw !== 'object' || raw === null) return {};
+  const overrides: Record<string, SurveyPopupOverride> = {};
+  for (const [model, entry] of Object.entries(raw)) {
+    const parsed = surveyPopupOverrideSchema.safeParse(entry);
+    if (parsed.success) overrides[model] = parsed.data;
+  }
+  return overrides;
+}
+
+const surveyPopupConfigSchema = z.unknown().transform((raw): Partial<SurveyPopupPayload> => {
   if (typeof raw !== 'object' || raw === null) return {};
   const record = raw as Record<string, unknown>;
   const partial: Record<string, unknown> = {};
@@ -65,21 +88,33 @@ const surveyPopupConfigSchema = z.unknown().transform((raw): Partial<SurveyPopup
     const parsed = schema.safeParse(value);
     if (parsed.success) partial[key] = parsed.data;
   }
-  return partial as Partial<SurveyPopupConfig>;
+  if (record['model_overrides'] !== undefined) {
+    partial['model_overrides'] = parseModelOverrides(record['model_overrides']);
+  }
+  return partial as Partial<SurveyPopupPayload>;
 });
 
-function withDefaults(partial: Partial<SurveyPopupConfig> | undefined): SurveyPopupConfig {
-  return { ...DEFAULT_SURVEY_POPUP_CONFIG, ...partial };
+function withDefaults(partial: Partial<SurveyPopupPayload> | undefined): SurveyPopupPayload {
+  return { ...DEFAULT_SURVEY_POPUP_PAYLOAD, ...partial };
 }
 
 export async function getSurveyPopupConfig(
   options: ClientConfigFetchOptions = {},
-): Promise<SurveyPopupConfig> {
+): Promise<SurveyPopupPayload> {
   return withDefaults(await getClientConfig(CONFIG_NAME, surveyPopupConfigSchema, options));
 }
 
-export function peekSurveyPopupConfig(now?: number): SurveyPopupConfig {
+export function peekSurveyPopupConfig(now?: number): SurveyPopupPayload {
   return withDefaults(peekClientConfig(CONFIG_NAME, surveyPopupConfigSchema, now));
+}
+
+export function resolveSurveyPopupConfig(
+  payload: SurveyPopupPayload,
+  kfcModelId: string | undefined,
+): SurveyPopupConfig {
+  const { model_overrides: modelOverrides, ...base } = payload;
+  const override = kfcModelId === undefined ? undefined : modelOverrides[kfcModelId];
+  return override === undefined ? base : { ...base, ...override };
 }
 
 export function peekSurveyPopupConfigFresh(now?: number): boolean {

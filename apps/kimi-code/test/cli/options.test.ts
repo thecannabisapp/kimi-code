@@ -48,7 +48,6 @@ describe('CLI options parsing', () => {
       expect(opts.outputFormat).toBeUndefined();
       expect(opts.prompt).toBeUndefined();
       expect(opts.skillsDirs).toEqual([]);
-      expect(opts.agentsDir).toBeUndefined();
       expect(opts.agent).toBeUndefined();
       expect(opts.agentFiles).toEqual([]);
       expect(opts.addDirs).toEqual([]);
@@ -400,12 +399,6 @@ describe('CLI options parsing', () => {
     });
   });
 
-  describe('--agents-dir', () => {
-    it('parses a custom agents directory', () => {
-      expect(parse(['--agents-dir', '/custom/agents']).agentsDir).toBe('/custom/agents');
-    });
-  });
-
   describe('--agent / --agent-file', () => {
     it('describes agent selectors as new-session-only', () => {
       const help = createProgram('0.1.0-test', () => {}, () => {}).helpInformation();
@@ -531,7 +524,7 @@ describe('CLI options parsing', () => {
 
   describe('sub-commands', () => {
     it('routes upgrade without calling the main action', () => {
-      let upgradeCalls = 0;
+      const upgradeYes: boolean[] = [];
       const program = createProgram(
         '0.0.0',
         () => {
@@ -539,8 +532,8 @@ describe('CLI options parsing', () => {
         },
         () => {},
         () => {},
-        () => {
-          upgradeCalls += 1;
+        (yes) => {
+          upgradeYes.push(yes);
         },
       );
       program.exitOverride();
@@ -551,11 +544,11 @@ describe('CLI options parsing', () => {
 
       program.parse(['node', 'kimi', 'upgrade']);
 
-      expect(upgradeCalls).toBe(1);
+      expect(upgradeYes).toEqual([false]);
     });
 
     it('routes update alias to the upgrade handler', () => {
-      let upgradeCalls = 0;
+      const upgradeYes: boolean[] = [];
       const program = createProgram(
         '0.0.0',
         () => {
@@ -563,8 +556,8 @@ describe('CLI options parsing', () => {
         },
         () => {},
         () => {},
-        () => {
-          upgradeCalls += 1;
+        (yes) => {
+          upgradeYes.push(yes);
         },
       );
       program.exitOverride();
@@ -573,9 +566,9 @@ describe('CLI options parsing', () => {
         writeErr: () => {},
       });
 
-      program.parse(['node', 'kimi', 'update']);
+      program.parse(['node', 'kimi', 'update', '-y']);
 
-      expect(upgradeCalls).toBe(1);
+      expect(upgradeYes).toEqual([true]);
     });
 
     it('registers the visible sub-commands', () => {
@@ -599,6 +592,8 @@ describe('CLI options parsing', () => {
         'login',
         'doctor',
         'vis',
+        'install-desktop',
+        'app',
         'migrate',
         'upgrade',
       ]);

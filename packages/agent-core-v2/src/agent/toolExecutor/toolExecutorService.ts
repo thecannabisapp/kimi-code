@@ -308,6 +308,7 @@ export class AgentToolExecutorService implements IAgentToolExecutorService {
       toolCallId: call.toolCall.id,
       toolName: call.toolName,
       result: finalized,
+      durationMs: timedResult.durationMs,
     };
   }
 
@@ -527,6 +528,7 @@ export class AgentToolExecutorService implements IAgentToolExecutorService {
         trace: options.trace,
         metadata,
         signal,
+        steerSignal: options.steerSignal,
         onUpdate: (update) => {
           if (signal.aborted) return;
           this.dispatchToolProgress(call, update, options);

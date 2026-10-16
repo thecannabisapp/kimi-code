@@ -14,8 +14,7 @@
  *    a full REST refresh; nothing is resynced from the socket itself.
  *
  * Rendering is turn-granular (turn → step → frame) and typed entirely by the
- * transcript data model. Prompts/cancels go through the `IAgentPromptService`
- * / `IAgentLoopService` channels
+ * transcript data model. Cancels go through the `IAgentLoopService` channel
  * over the debug RPC surface (`/api/v1/debug`); interaction answers
  * (approve/reject, answer/dismiss) go through the public REST endpoints
  * (`src/interactions/api.ts`); the running indicator
@@ -23,7 +22,6 @@
  */
 
 import { IAgentLoopService } from '@moonshot-ai/agent-core-v2/agent/loop/loop';
-import { IAgentPromptService } from '@moonshot-ai/agent-core-v2/agent/prompt/prompt';
 import {
   type QuestionItem,
   type QuestionRequest,
@@ -372,7 +370,6 @@ export function ChatView({
   onOpenSearchHit?: ((hit: SearchHit) => void) | undefined;
 }) {
   const { klient, baseUrl, config } = useConnection();
-  const [input, setInput] = useState('');
   const [sendError, setSendError] = useState<unknown>(null);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [olderError, setOlderError] = useState<unknown>(null);
@@ -565,27 +562,10 @@ export function ChatView({
   );
   const latestTodo = [...state.todos.values()].at(-1);
 
-  const send = async () => {
-    if (sessionId === null || input.trim() === '' || running) return;
-    const text = input.trim();
-    setInput('');
-    setSendError(null);
-    try {
-      await klient
-        .session(sessionId)
-        .agent(agentId)
-        .service(IAgentPromptService)
-        .submit({ input: [{ type: 'text', text }] });
-      trail?.recordEvent('prompt', text, state);
-    } catch (error) {
-      setSendError(error);
-    }
-  };
-
   const cancel = async () => {
     if (sessionId === null) return;
     try {
-      await klient.session(sessionId).agent(agentId).service(IAgentLoopService).cancelFromUser();
+      await klient.session(sessionId).agent(agentId).service(IAgentLoopService).cancel(undefined);
       trail?.recordEvent('cancel', undefined, state);
     } catch (error) {
       setSendError(error);
@@ -655,7 +635,7 @@ export function ChatView({
           ) : null}
           {items.length === 0 && loadError === null ? (
             <div className="text-[12px] text-neutral-600 italic">
-              {loaded ? 'Empty transcript — send a prompt below.' : 'Loading transcript…'}
+              {loaded ? 'Empty transcript.' : 'Loading transcript…'}
             </div>
           ) : null}
           {latestTodo !== undefined && latestTodo.items.length > 0 ? (
@@ -714,27 +694,10 @@ export function ChatView({
               <ErrorLine error={sendError} />
             </div>
           ) : null}
-          <div className="flex gap-2">
-            <textarea
-              className="min-h-[40px] flex-1 resize-y rounded border border-neutral-700 bg-neutral-950 px-3 py-2 text-[13px] text-neutral-100 outline-none focus:border-sky-600"
-              placeholder="Send a prompt to the active agent… (Enter to send, Shift+Enter for newline)"
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && !e.shiftKey) {
-                  e.preventDefault();
-                  void send();
-                }
-              }}
-            />
-            <div className="flex flex-col gap-2">
-              <ActionButton onClick={() => void send()} disabled={running || input.trim() === ''}>
-                Send
-              </ActionButton>
-              <ActionButton onClick={() => void cancel()} danger disabled={!running}>
-                Cancel
-              </ActionButton>
-            </div>
+          <div className="flex justify-end">
+            <ActionButton onClick={() => void cancel()} danger disabled={!running}>
+              Cancel
+            </ActionButton>
           </div>
         </div>
       </div>

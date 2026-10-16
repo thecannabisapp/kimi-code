@@ -1,8 +1,7 @@
 import {
   IAgentLifecycleService,
-  IAgentActivityView,
+  IAgentConversationUndoParticipantRegistry,
   IAgentLoopService,
-  IAgentPromptService,
   IAgentScopeContext,
   IAgentTaskService,
   IEventBus,
@@ -20,6 +19,7 @@ import {
 } from '@moonshot-ai/agent-core-v2';
 import type { AgentDescriptor, TranscriptChangeEvent, TranscriptStore } from '@moonshot-ai/transcript';
 
+import { legacyApprovalsOf } from '../legacyStatus/legacyActivity';
 import {
   AgentTranscriptProjector,
   type ProjectorBusEvent,
@@ -32,6 +32,7 @@ export interface TranscriptBindingLogger {
 
 export interface TranscriptBinding extends IDisposable {
   seedPendingInteractions(agentId?: string): void;
+  syncFromStore(agentId: string): void;
 }
 
 export function bindSessionTranscript(
@@ -39,6 +40,7 @@ export function bindSessionTranscript(
   session: ISessionScopeHandle,
   logger?: TranscriptBindingLogger,
   onOps?: (event: TranscriptChangeEvent) => void,
+  reconcileAfterUndo?: (agentId: string) => Promise<void>,
 ): TranscriptBinding {
   const agents = session.accessor.get(IAgentLifecycleService);
   const pendingInteractions = (): readonly Interaction[] =>
@@ -95,12 +97,24 @@ export function bindSessionTranscript(
         stepOrdinal: (turnId) => {
           const agentHandle = agents.handleOf(agentId);
           if (agentHandle === undefined) return undefined;
-          const view: IAgentActivityView | undefined = agentHandle.accessor.get(IAgentActivityView);
-          const turn = view?.state().turn;
+          const turn = agentHandle.accessor.get(IAgentLoopService)?.snapshot().turn;
           return turn === undefined || `t${turn.turnId}` !== turnId ? undefined : turn.step;
         },
+        activitySnapshot: () =>
+          agents.handleOf(agentId)?.accessor.get(IAgentLoopService)?.snapshot() ?? {},
+        pendingApprovals: () => {
+          const agentHandle = agents.handleOf(agentId);
+          return agentHandle === undefined ? [] : legacyApprovalsOf(agentHandle);
+        },
         turn: (turnId) => store.getAgent(agentId)?.getTurn(turnId),
-        items: () => store.getAgent(agentId)?.getItems(),
+        maxOrdinal: () => {
+          let max = -1;
+          for (const item of store.getAgent(agentId)?.getItems() ?? []) {
+            if (item.kind === 'turn' && item.ordinal > max) max = item.ordinal;
+          }
+          return max;
+        },
+        prompt: (promptId) => store.getAgent(agentId)?.getPrompt(promptId),
         resolvePlanRevisionKey: (key) =>
           agents.handleOf(agentId)?.accessor.get(IAgentScopeContext).scope(key) ?? key,
       });
@@ -135,15 +149,25 @@ export function bindSessionTranscript(
     store.ensureAgent(handle.id, { agentId: handle.id });
     const bus = handle.accessor.get(IEventBus);
     const busD = bus.subscribe((event) =>
-      applyOps(handle.id, projector.map(event as ProjectorBusEvent)),
+      applyOps(handle.id, projectorFor(handle.id).map(event as ProjectorBusEvent)),
     );
-    const loopStatus = handle.accessor.get(IAgentLoopService)?.status();
+    const loopStatus = handle.accessor.get(IAgentLoopService)?.snapshot();
     if (loopStatus?.state === 'running' && loopStatus.activeTurnId !== undefined) {
-      const promptId = handle.accessor.get(IAgentPromptService)?.list().active?.id;
+      const promptId = loopStatus.activePromptId;
       projector.seedActiveTurn({ turnId: loopStatus.activeTurnId, promptId });
     }
     const list = agentDisposables.get(handle.id) ?? [];
     list.push(busD);
+    if (reconcileAfterUndo !== undefined) {
+      list.push(handle.accessor.get(IAgentConversationUndoParticipantRegistry).register({
+        id: 'transcript',
+        phase: 'after-flush',
+        reconcileAfterUndo: async () => {
+          await reconcileAfterUndo(handle.id);
+          projectors.delete(handle.id);
+        },
+      }));
+    }
     agentDisposables.set(handle.id, list);
   };
 
@@ -271,6 +295,9 @@ export function bindSessionTranscript(
 
   return {
     seedPendingInteractions,
+    syncFromStore: (agentId) => {
+      projectors.get(agentId)?.syncFromStore();
+    },
     dispose: () => {
       for (const d of disposables) d.dispose();
       for (const list of agentDisposables.values()) {

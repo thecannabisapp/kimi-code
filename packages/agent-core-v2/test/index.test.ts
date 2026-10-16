@@ -92,7 +92,6 @@ const V2_RECORD_TYPES: ReadonlySet<string> = new Set([
   'plugin.session_start',
   'runtime.set_binding',
   'turn.ended',
-  'prompt.accepted',
   'prompt.aborted',
   'prompt.completed',
   'prompt.steered',
@@ -105,6 +104,11 @@ const V2_RECORD_TYPES: ReadonlySet<string> = new Set([
   'token_counting.turn_recorded',
   'turn.step.retrying',
   'turn.step.interrupted',
+  'subagent.spawned',
+  'subagent.started',
+  'subagent.completed',
+  'subagent.failed',
+  'subagent.cancelled',
 ]);
 
 describe('v1 wire vocabulary', () => {

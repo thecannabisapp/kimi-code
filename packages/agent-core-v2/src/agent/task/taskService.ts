@@ -14,7 +14,7 @@ import {
 } from '#/_base/utils/abort';
 import { setClampedTimeout } from '#/_base/utils/timer';
 import { escapeXml, escapeXmlAttr, escapeXmlTags } from '#/_base/utils/xml-escape';
-import { IEventBus } from '#/app/event/eventBus';
+import { IEventBus, ISessionEventBus } from '#/app/event/eventBus';
 import { Error2, ErrorCodes } from '#/errors';
 import { z } from 'zod';
 import {
@@ -29,13 +29,19 @@ import { IAgentReminderService } from '#/features/reminder/reminderService';
 import { IAgentLoopService, type LoopNotifyHandle } from '#/agent/loop/loop';
 import { IAgentScopeContext } from '#/agent/scopeContext/scopeContext';
 import { IAgentStateService } from '#/agent/state/agentState';
+import { IAgentToolPolicyService } from '#/agent/toolPolicy/toolPolicy';
+import { IAgentToolRegistryService } from '#/agent/toolRegistry/toolRegistry';
+import { WAIT_FOR_FLAG_ID } from '#/agent/tools/task/task-wait/flag';
+import { IFlagService } from '#/app/flag/flag';
 import { ITaskService, type ITaskHandle, TERMINAL_TASK_STATES } from '#/app/task/task';
+import { MAIN_AGENT_ID } from '#/session/agentLifecycle/agentLifecycle';
 import {
   TERMINAL_STATUSES,
   type AgentTaskInfoBase,
   type AgentTaskSettlement,
 } from './types';
 import { renderNotificationXml } from './notificationXml';
+import { formatTaskWallTime } from './wallTime';
 
 import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory';
 import { IConfigService } from '#/app/config/config';
@@ -170,6 +176,9 @@ const ACTIVE_BACKGROUND_TASK_GUIDANCE = [
   'Do not start duplicates. Use TaskList to list them, TaskOutput for a non-blocking status/output snapshot, and TaskStop to cancel one — completion arrives via automatic notification.',
 ].join(' ');
 
+export const SUBAGENT_BACKGROUND_TASK_NOTICE =
+  'You are running as a subagent: ending your turn is your final hand-off to the parent agent, and completion notifications that arrive after it reach no one. Do not end your turn while a background task whose result you need is still running. Keep waiting for it with WaitFor, calling it again after a timeout if needed, or run the command in the foreground with a suitable timeout instead. Still use the waiting time for other useful work on your task when you can.';
+
 export function isAgentTaskTerminal(status: AgentTaskStatus): boolean {
   return TERMINAL_STATUSES.has(status);
 }
@@ -205,6 +214,7 @@ export class AgentTaskService extends Disposable implements IAgentTaskService {
   declare readonly _serviceBrand: undefined;
 
   private readonly tasks = new Map<string, ManagedTask>();
+  private exitSuppressionArmed = false;
   private readonly buildingNotificationKeys = new Set<string>();
   private readonly pendingNotificationRequests = new Map<string, LoopNotifyHandle>();
   private readonly persistence: AgentTaskPersistence;
@@ -220,6 +230,7 @@ export class AgentTaskService extends Disposable implements IAgentTaskService {
     @IAgentScopeContext private readonly scopeContext: IAgentScopeContext,
     @ITaskService private readonly taskService: ITaskService,
     @IEventBus private readonly eventBus: IEventBus,
+    @ISessionEventBus private readonly sessionEventBus: ISessionEventBus,
     @IEventDispatcher private readonly dispatcher: IEventDispatcher,
     @IAgentReminderService private readonly reminder: IAgentReminderService,
     @IAgentLoopService private readonly loop: IAgentLoopService,
@@ -227,6 +238,9 @@ export class AgentTaskService extends Disposable implements IAgentTaskService {
     undoParticipants: IAgentConversationUndoParticipantRegistry,
     @ILogService private readonly log: ILogService,
     @IAgentStateService private readonly states: IAgentStateService,
+    @IFlagService flags: IFlagService,
+    @IAgentToolRegistryService tools: IAgentToolRegistryService,
+    @IAgentToolPolicyService policy: IAgentToolPolicyService,
   ) {
     super();
     this.states.contributeState(taskKey);
@@ -278,6 +292,19 @@ export class AgentTaskService extends Disposable implements IAgentTaskService {
         this.activeBackgroundTaskReminder(),
       ),
     );
+    if (this.scopeContext.agentId !== MAIN_AGENT_ID) {
+      this._register(
+        this.reminder.register('subagent_background_task', ({ lastInjectedAt }) => {
+          if (
+            lastInjectedAt !== null ||
+            !flags.enabled(WAIT_FOR_FLAG_ID) ||
+            tools.resolve('WaitFor') === undefined ||
+            !policy.isToolActive('WaitFor')
+          ) return undefined;
+          return SUBAGENT_BACKGROUND_TASK_NOTICE;
+        }),
+      );
+    }
   }
 
   private get ghosts(): Map<string, AgentTaskInfo> {
@@ -778,21 +805,16 @@ export class AgentTaskService extends Disposable implements IAgentTaskService {
     return results.filter((info): info is AgentTaskInfo => info !== undefined);
   }
 
+  async suppressAllTerminalNotifications(): Promise<void> {
+    this.exitSuppressionArmed = true;
+    for (const [, request] of Array.from(this.pendingNotificationRequests)) {
+      request.drop();
+    }
+  }
+
   async stopAllOnExit(reason: string): Promise<readonly AgentTaskInfo[]> {
+    await this.suppressAllTerminalNotifications();
     if (this.keepAliveOnExit()) return [];
-    const active = this.list(true);
-    await Promise.allSettled(
-      active
-        .filter((task) => task.detached === true)
-        .map((task) =>
-          this.suppressTerminalNotification(task.taskId).catch((error: unknown) => {
-            this.log.error('terminal notification suppression failed', {
-              taskId: task.taskId,
-              error,
-            });
-          }),
-        ),
-    );
     return this.stopAll(reason);
   }
 
@@ -827,6 +849,14 @@ export class AgentTaskService extends Disposable implements IAgentTaskService {
 
   private keepAliveOnExit(): boolean {
     return resolveAgentTaskConfig(this.config)?.keepAliveOnExit === true;
+  }
+
+  private lifecycleActive(): boolean {
+    return this.sessionEventBus.isAgentActive(this.scopeContext.agentContext);
+  }
+
+  private marksTerminalNotificationSuppressed(entry: ManagedTask): boolean {
+    return this.exitSuppressionArmed && !this.keepAliveOnExit() && this.isDetached(entry);
   }
 
   async wait(
@@ -1030,11 +1060,21 @@ export class AgentTaskService extends Disposable implements IAgentTaskService {
       entry.timeoutHandle = undefined;
     }
     const foregroundRelease = entry.foregroundRelease;
+    if (this.marksTerminalNotificationSuppressed(entry)) {
+      entry.terminalNotificationSuppressed = true;
+    }
     if (entry.outputPersistStarted) {
       await this.persistLive(entry);
     } else {
       entry.pendingOutput = [];
       entry.pendingOutputBytes = 0;
+    }
+    if (
+      this.marksTerminalNotificationSuppressed(entry) &&
+      entry.terminalNotificationSuppressed !== true
+    ) {
+      entry.terminalNotificationSuppressed = true;
+      await this.persistLive(entry);
     }
     this.fireTerminalEffects(entry);
     foregroundRelease?.resolve('terminal');
@@ -1061,9 +1101,11 @@ export class AgentTaskService extends Disposable implements IAgentTaskService {
   }
 
   private recordTaskStarted(info: AgentTaskInfo): void {
-    void this.dispatcher.dispatch(
-      new TaskStarted({ agentId: this.scopeContext.agentId, info }),
-    );
+    if (this.lifecycleActive()) {
+      void this.dispatcher.dispatch(
+        new TaskStarted({ agentId: this.scopeContext.agentId, info }),
+      );
+    }
     this.telemetry.track2('background_task_created', {
       task_id: info.taskId,
       kind: info.kind === 'process' ? 'bash' : info.kind,
@@ -1071,9 +1113,11 @@ export class AgentTaskService extends Disposable implements IAgentTaskService {
   }
 
   private recordTaskTerminated(info: AgentTaskInfo, outputTail?: string): void {
-    void this.dispatcher.dispatch(
-      new TaskTerminated({ agentId: this.scopeContext.agentId, info, outputTail }),
-    );
+    if (this.lifecycleActive()) {
+      void this.dispatcher.dispatch(
+        new TaskTerminated({ agentId: this.scopeContext.agentId, info, outputTail }),
+      );
+    }
     this.telemetry.track2('background_task_completed', {
       task_id: info.taskId,
       kind: info.kind,
@@ -1083,8 +1127,10 @@ export class AgentTaskService extends Disposable implements IAgentTaskService {
   }
 
   private async notifyAgentTask(info: AgentTaskInfo): Promise<void> {
+    if (!this.lifecycleActive()) return;
     const context = await this.buildAgentTaskNotificationContext(info);
     if (context === undefined) return;
+    if (!this.lifecycleActive() || this.isTerminalNotificationSuppressed(info.taskId)) return;
     const key = notificationKey(context.origin);
     if (this.deliveredNotificationKeys.has(key)) return;
     const handle = this.loop.notify({
@@ -1275,6 +1321,7 @@ export class AgentTaskService extends Disposable implements IAgentTaskService {
   }
 
   private fireNotificationHook(notification: AgentTaskNotification): void {
+    if (!this.lifecycleActive()) return;
     void this.dispatcher.dispatch(
       new TaskNotified({
         agentId: this.scopeContext.agentId,
@@ -1290,6 +1337,7 @@ export class AgentTaskService extends Disposable implements IAgentTaskService {
 
   private isTerminalNotificationSuppressed(taskId: string): boolean {
     return (
+      this.exitSuppressionArmed ||
       this.tasks.get(taskId)?.terminalNotificationSuppressed === true ||
       this.ghosts.get(taskId)?.terminalNotificationSuppressed === true
     );
@@ -1517,11 +1565,12 @@ function buildAgentTaskNotificationBody(info: AgentTaskInfo): string {
         : info.stopReason
           ? `${info.description} ${info.status === 'killed' ? 'was stopped' : info.status}. Reason: ${info.stopReason}`
           : `${info.description} ${info.status}.`;
+  const timed = `Wall time: ${formatTaskWallTime(info)}\n${baseLine}`;
 
-  if (info.kind !== 'agent') return baseLine;
-  if (info.status === 'completed') return baseLine;
+  if (info.kind !== 'agent') return timed;
+  if (info.status === 'completed') return timed;
   const agentId = info.agentId;
-  if (agentId === undefined || agentId === info.taskId) return baseLine;
+  if (agentId === undefined || agentId === info.taskId) return timed;
 
   const recovery = [
     '',
@@ -1531,7 +1580,7 @@ function buildAgentTaskNotificationBody(info: AgentTaskInfo): string {
     'The subagent retains its full prior context across the restart, but any in-flight tool call lost its result and may need to be redone.',
   ].join('\n');
 
-  return `${baseLine}${recovery}`;
+  return `${timed}${recovery}`;
 }
 
 function buildAgentTaskNotification(

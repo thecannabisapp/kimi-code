@@ -192,7 +192,7 @@ These endpoints drive the managed Kimi OAuth login lifecycle and expose account-
 | `GET /api/v1/oauth/login` | Poll the login flow state |
 | `DELETE /api/v1/oauth/login` | Cancel a pending login flow |
 | `POST /api/v1/oauth/logout` | Log out the managed provider |
-| `GET /api/v1/oauth/usage` | Plan usage and limits |
+| `GET /api/v1/oauth/usage` | Plan quota and booster wallet |
 | `GET /api/v1/oauth/userinfo` | Account profile |
 | `GET /api/v1/oauth/region` | Resolve the client region (`mainland-cn` / `global`) |
 
@@ -237,6 +237,8 @@ On success, `data` is `{ cancelled, status }`: `cancelled` is `true` only when a
 
 Logs out the managed provider: discards the stored OAuth credential, aborts any pending login flow, and removes the managed provider from the configuration. OAuth-managed providers reject manual edit and delete (see `PUT` / `DELETE /api/v1/providers/{provider_id}` below), so log out first to remove one.
 
+For the default Kimi provider (`managed:kimi-code`), logout also tears down this machine's Remote Control and clears cached Remote Control cloud sessions. When no tunnel is running or another process hosts it, logout first deactivates this machine's device and holds the machine lock so no process on this machine can start Remote Control again until the credential is discarded; a cleanup failure aborts the logout. When this server hosts the tunnel, the credential is discarded first and the tunnel is torn down right after the response is flushed, so a logout sent through the Remote Control link still receives its response. Logging out any other provider leaves Remote Control untouched.
+
 | Parameter | In | Type | Description |
 | --- | --- | --- | --- |
 | `provider` | body | string | Managed provider name. Default `managed:kimi-code` |
@@ -245,13 +247,13 @@ On success, `data` is `{ logged_out: true, provider }`.
 
 #### `GET /api/v1/oauth/usage`
 
-Plan usage and limits of the managed account, fetched live from the account service. An upstream failure does not fail the envelope — it comes back in-band with `kind: "error"`.
+Plan quota and booster wallet of the managed account, fetched live from the account service. An upstream failure does not fail the envelope — it comes back in-band with `kind: "error"`.
 
 | Parameter | In | Type | Description |
 | --- | --- | --- | --- |
 | `provider` | query | string | Managed provider name. Default `managed:kimi-code` |
 
-On success, `data` is `{ kind: "ok", summary, limits, extra_usage }` or `{ kind: "error", message, status? }`, where `status` is the upstream HTTP status when one exists. In the `ok` shape, `summary` (nullable) is the primary quota row and `limits` lists every quota window; a row is `{ name?, window?, used, limit, reset_at? }` with `window` as `{ duration, unit }`, `unit` one of `minute` / `hour` / `day` / `week`. `extra_usage` (nullable) is the pay-as-you-go wallet: `{ balance_cents, total_cents, monthly_charge_limit_enabled, monthly_charge_limit_cents, monthly_used_cents, currency }`.
+On success, `data` is `{ kind: "ok", quota }` or `{ kind: "error", message, status? }`, where `status` is the upstream HTTP status when one exists. In the `ok` shape, `quota` is `{ usages, extraUsage }`: `usages` carries one `{ usedRatio, resetAt? }` entry per quota window the account has — `limit5h`, `limit7d`, `monthTotal`, `monthCode` — with `usedRatio` as a 0–1 float and `resetAt` as an RFC3339 reset timestamp, and clients render whichever entries are present; `extraUsage` (nullable) is the pay-as-you-go wallet: `{ balanceCents, totalCents, monthlyChargeLimitEnabled, monthlyChargeLimitCents, monthlyUsedCents, currency }`.
 
 #### `GET /api/v1/oauth/userinfo`
 
@@ -268,6 +270,63 @@ On success, `data` is `{ kind: "ok", userInfo }` or `{ kind: "error", message, s
 Resolves which Kimi region this client belongs to. The answer is derived locally, not probed over the network: an OAuth host pinned by environment or config wins first, then the configured OAuth key, then the region marker file in the home directory; the default is `mainland-cn`.
 
 On success, `data` is `{ region }` with `region` one of `mainland-cn` / `global`.
+
+### Remote Control
+
+These endpoints manage the machine-wide Remote Control tunnel (see the [Remote Control guide](../guides/remote-control.md)) and the account's device registry. The tunnel state is per machine; the device registry is per account and lives in the cloud, so device endpoints require a Kimi login and proxy the relay with a server-side session — OAuth credentials never reach the caller.
+
+#### `GET /api/v1/remote-control`
+
+Returns the current tunnel status. When the tunnel is off but another live process on this machine holds the single-instance lock, `data.conflict` carries that holder; the lock is re-inspected on every read, so a dead holder clears both `conflict` and the stored `error`.
+
+On success, `data` is `{ enabled, state, url?, device_id?, device_name?, error?, conflict? }` with `state` one of `off` / `starting` / `on` / `stopping` and `conflict` as `{ pid, local_origin, device_id, url, started_at }`.
+
+#### `POST /api/v1/remote-control`
+
+Starts or stops the tunnel.
+
+| Parameter | In | Type | Description |
+| --- | --- | --- | --- |
+| `enabled` | body | boolean | `true` to start the tunnel, `false` to stop it |
+
+On success, `data` is the same status object as `GET /api/v1/remote-control`. Starting while another live process on this machine holds the single-instance lock fails with `REMOTE_CONTROL_ALREADY_RUNNING` (40928), with the lock holder in `details` in the same shape as `conflict`.
+
+#### `GET /api/v1/remote-control/devices`
+
+Lists the account's Remote Control devices from the cloud registry.
+
+On success, `data` is `{ devices, max_devices? }`. Each device is `{ device_id, alias, status, platform, client_version, local_base_url, created_at, updated_at, last_remote_access_at }` with `status` one of `online` / `offline`.
+
+#### `PATCH /api/v1/remote-control/devices/{id}`
+
+Renames a device.
+
+| Parameter | In | Type | Description |
+| --- | --- | --- | --- |
+| `id` | path | string | Device identifier |
+| `alias` | body | string | New display name, trimmed; 1–50 characters |
+
+Blank or over-long aliases fail with `VALIDATION_FAILED` before reaching the cloud. On success, `data` is `{ ok: true }`.
+
+#### `POST /api/v1/remote-control/devices/{id}/deactivate`
+
+Takes a device offline in the cloud registry. Offline devices stay listed and do not consume the plan's device quota; a device comes back the next time it turns on Remote Control. When the target is this machine, the local tunnel is stopped first (an in-flight start is cancelled); the request then holds the machine lock while deactivating, so a concurrent enable cannot re-register the device behind a successful response. A holder that does not stop in time fails the request with `INTERNAL_ERROR` instead of reporting success.
+
+| Parameter | In | Type | Description |
+| --- | --- | --- | --- |
+| `id` | path | string | Device identifier |
+
+On success, `data` is `{ ok: true }`.
+
+#### `DELETE /api/v1/remote-control/devices/{id}`
+
+Removes a device from the cloud registry: it disappears from the device list and its tunnel, if still connected, is disconnected. Deactivating keeps an offline device listed; deleting removes it entirely. When the target is this machine, the local tunnel is stopped first and the machine lock is held while deleting, so the device cannot re-register behind a successful response.
+
+| Parameter | In | Type | Description |
+| --- | --- | --- | --- |
+| `id` | path | string | Device identifier |
+
+On success, `data` is `{ ok: true }`.
 
 ### Config
 
@@ -304,6 +363,7 @@ On success, `data` is the config object; its fields mirror the top-level domains
 | `secondary_model` | object | Secondary model pool for subagents |
 | `experimental` | object | Experimental flag id → enabled |
 | `telemetry` | boolean | Whether anonymous telemetry is enabled |
+| `auto_session_title` | boolean | Whether clients may automatically generate session titles |
 | `raw` | object | Raw parsed `config.toml` content, unmodeled fields included |
 
 #### `POST /api/v1/config`
@@ -336,6 +396,7 @@ The body is a partial config object — any subset of the response domains above
 | `secondary_model` | body | object | Secondary model pool for subagents |
 | `experimental` | body | object | Experimental flag id → enabled |
 | `telemetry` | body | boolean | Whether anonymous telemetry is enabled |
+| `auto_session_title` | body | boolean | Whether clients may automatically generate session titles |
 
 On success, `data` is the full updated config in the same shape as `GET /api/v1/config`.
 
@@ -530,7 +591,7 @@ On success, `data` is `{ providers, models_imported }` — an array of provider 
 
 Browses the models.dev directory, proxied by the server with a 10-minute in-memory cache and a built-in snapshot fallback. Items keep the upstream directory order. Entries the server cannot import carry `rejected: true` with a machine-readable `reject_reason`; entries with `needs_base_url: true` require a base URL at import time.
 
-On success, `data.items` is an array of `{ id, name, wire_type, guessed, needs_base_url, rejected, reject_reason, env_key, models }`: `wire_type` is the resolved protocol (nullable, same enum as a provider `type`), `guessed` marks a heuristic resolution, `env_key` is the upstream's conventional API-key environment variable (nullable), and `models` is an array of `{ id, name?, max_context_size, capabilities?, reasoning }`.
+On success, `data.items` is an array of `{ id, name, wire_type, base_url, guessed, needs_base_url, rejected, reject_reason, env_key, models }`: `wire_type` is the resolved protocol (nullable, same enum as a provider `type`), `base_url` is the resolved endpoint (nullable; `null` for entries that need a base URL or were rejected), `guessed` marks a heuristic resolution, `env_key` is the upstream's conventional API-key environment variable (nullable), and `models` is an array of `{ id, name?, max_context_size, capabilities?, reasoning }`.
 
 - `50004`: the directory is unavailable (both the live fetch and the built-in snapshot failed)
 
@@ -687,7 +748,7 @@ On success, `data` is the updated [session object](#the-session-object).
 
 #### `POST /api/v1/sessions/{session_id}/title/generate`
 
-Generates a title from the session's prompts through the managed provider's `chat_title` tool and applies it, broadcasting `session.meta.updated`. Generation requires the managed OAuth login and the `auto_session_title` experimental flag; without `force`, a session that already has a custom or generated title is reported unavailable instead of being overwritten.
+Generates a title from the session's prompts through the managed provider's `chat_title` tool and applies it, broadcasting `session.meta.updated`. Generation requires the managed OAuth login; without `force`, a session that already has a custom or generated title is reported unavailable instead of being overwritten.
 
 | Parameter | In | Type | Description |
 | --- | --- | --- | --- |
@@ -1126,7 +1187,7 @@ Lists the session's pending approval requests — the permission prompts raised 
 | `session_id` | path | string | **Required.** Session id |
 | `status` | query | string | **Required.** Must be `pending` |
 
-On success, `data` is `{ items }` where each item is `{ approval_id, session_id, turn_id?, tool_call_id, tool_name, action, tool_input_display, created_at, expires_at }`: `tool_name` / `action` / `tool_input_display` describe the call waiting for permission, and `expires_at` is 24 hours after `created_at`.
+On success, `data` is `{ items }` where each item is `{ approval_id, session_id, agent_id, turn_id?, tool_call_id, tool_name, action, tool_input_display, created_at, expires_at }`: `agent_id` names the agent whose tool call is waiting for permission (`main` for the main agent); `tool_name` / `action` / `tool_input_display` describe the call waiting for permission, and `expires_at` is 24 hours after `created_at`.
 
 - `40001`: `status` missing or not `pending`
 - `40401`: session not found
@@ -1160,7 +1221,7 @@ Lists the session's pending questions.
 | `session_id` | path | string | **Required.** Session id |
 | `status` | query | string | **Required.** Must be `pending` |
 
-On success, `data` is `{ items }` where each item is `{ question_id, session_id, turn_id?, tool_call_id?, questions, created_at }`. `questions` holds 1–4 items `{ id, question, header?, body?, options, multi_select?, allow_other?, other_label?, other_description? }`, each with 2–4 `options` of `{ id, label, description? }`; `multi_select` allows several options, `allow_other` a free-text answer.
+On success, `data` is `{ items }` where each item is `{ question_id, session_id, agent_id?, turn_id?, tool_call_id?, questions, created_at }`. `agent_id` names the asking agent when known (`main` for the main agent). `questions` holds 1–4 items `{ id, question, header?, body?, options, multi_select?, allow_other?, other_label?, other_description? }`, each with 2–4 `options` of `{ id, label, description? }`; `multi_select` allows several options, `allow_other` a free-text answer.
 
 - `40001`: `status` missing or not `pending`
 - `40401`: session not found
@@ -1369,7 +1430,7 @@ On success, `data` is `{ restarting: true }`.
 
 ### Capabilities and plugins
 
-Capabilities are built-in features with layered readiness — detection steps plus a background install; the current build registers `kimi-cu` (Kimi Computer Use) and `kimi-webbridge` (Kimi WebBridge). Plugins are installed packages of skills, MCP servers, hooks, and commands. These endpoints report capability status and drive capability installs, and manage the plugin lifecycle from marketplace listing to removal.
+Capabilities are built-in features with layered readiness — detection steps plus a background install; the current build registers `kimi-cu` (Kimi Computer Use) and `kimi-webbridge` (Kimi Browser Extension). Plugins are installed packages of skills, MCP servers, hooks, and commands. These endpoints report capability status and drive capability installs, and manage the plugin lifecycle from marketplace listing to removal.
 
 | Method and path | Description |
 | --- | --- |
@@ -1704,6 +1765,7 @@ Lists the entries of a session workspace directory, optionally recursing into su
 | `show_hidden` | body | boolean | Include dotfiles. Default `false` |
 | `follow_gitignore` | body | boolean | Skip gitignored paths. Default `true` |
 | `exclude_globs` | body | string[] | Additional globs to skip |
+| `allow_ignored_globs` | body | string[] | Globs to show even when gitignored (e.g. `.tmp`). Ignored ancestor directories of a match are kept so the match stays reachable. Allowing dot-paths also requires `show_hidden: true` |
 | `sort` | body | string | `type_first` (default) / `name_asc` / `name_desc` / `mtime_desc` / `size_desc` |
 | `include_git_status` | body | boolean | Attach each entry's git status. Default `false` |
 

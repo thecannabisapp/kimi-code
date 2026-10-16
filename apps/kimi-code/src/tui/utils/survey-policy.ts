@@ -11,6 +11,7 @@ export type SurveyKind = 'session' | 'long_context';
 
 export type SurveyGateSkipReason =
   | 'mount-roll-consumed'
+  | 'mount-survey-shown'
   | 'survey-active'
   | 'turn-in-progress'
   | 'idle-too-short'
@@ -43,7 +44,7 @@ export interface SharedArmGateInput {
   readonly terminalHeight: number;
   readonly feedbackSurveyDisabled: boolean;
   readonly telemetryDisabled: boolean;
-  readonly currentModel: string;
+  readonly kfcModelId: string | undefined;
   readonly lastUserMessageStartsOrderedList: boolean;
 }
 
@@ -60,6 +61,8 @@ export interface LongContextArmGateInput extends SharedArmGateInput {
   readonly cumulativeTokens: number;
   readonly virtualContextTokens: number;
   readonly mountRollConsumed: boolean;
+  readonly mountSurveyShown: boolean;
+  readonly msSinceGlobalLastShown: number | undefined;
   readonly drawMountRoll: () => number;
 }
 
@@ -81,10 +84,10 @@ export type SurveyGateVerdict =
       readonly longContextRollConsumed?: boolean;
     };
 
-function modelGatePasses(onForModels: readonly string[], currentModel: string): boolean {
+function modelGatePasses(onForModels: readonly string[], kfcModelId: string | undefined): boolean {
   if (onForModels.length === 0) return false;
   if (onForModels.includes('*')) return true;
-  return onForModels.includes(currentModel);
+  return kfcModelId !== undefined && onForModels.includes(kfcModelId);
 }
 
 function evaluateSessionArm(input: SurveyGateInput): SurveyGateVerdict {
@@ -113,7 +116,7 @@ function evaluateSessionArm(input: SurveyGateInput): SurveyGateVerdict {
   }
   if (session.feedbackSurveyDisabled) return { show: false, reason: 'feature-disabled' };
   if (session.telemetryDisabled) return { show: false, reason: 'telemetry-disabled' };
-  if (!modelGatePasses(config.on_for_models, session.currentModel)) {
+  if (!modelGatePasses(config.on_for_models, session.kfcModelId)) {
     return { show: false, reason: 'model-gated' };
   }
   if (session.msSinceLastShown === undefined) {
@@ -141,6 +144,7 @@ function evaluateSessionArm(input: SurveyGateInput): SurveyGateVerdict {
 
 export function evaluateLongContextArm(input: SurveyGateInput): SurveyGateVerdict {
   const { longContext, config } = input;
+  if (longContext.mountSurveyShown) return { show: false, reason: 'mount-survey-shown' };
   if (longContext.mountRollConsumed) return { show: false, reason: 'mount-roll-consumed' };
   if (longContext.phase !== 'closed') return { show: false, reason: 'survey-active' };
   if (longContext.turnInProgress) return { show: false, reason: 'turn-in-progress' };
@@ -166,7 +170,7 @@ export function evaluateLongContextArm(input: SurveyGateInput): SurveyGateVerdic
   }
   if (longContext.feedbackSurveyDisabled) return { show: false, reason: 'feature-disabled' };
   if (longContext.telemetryDisabled) return { show: false, reason: 'telemetry-disabled' };
-  if (!modelGatePasses(config.on_for_models, longContext.currentModel)) {
+  if (!modelGatePasses(config.on_for_models, longContext.kfcModelId)) {
     return { show: false, reason: 'model-gated' };
   }
   if (!(config.long_context_survey_threshold > 0)) {
@@ -178,6 +182,12 @@ export function evaluateLongContextArm(input: SurveyGateInput): SurveyGateVerdic
       : longContext.virtualContextTokens;
   if (counter < config.long_context_survey_threshold) {
     return { show: false, reason: 'below-threshold' };
+  }
+  if (
+    longContext.msSinceGlobalLastShown !== undefined &&
+    longContext.msSinceGlobalLastShown < config.min_time_between_global_feedback_ms
+  ) {
+    return { show: false, reason: 'global-cooldown' };
   }
   if (longContext.drawMountRoll() >= config.long_context_probability) {
     return { show: false, reason: 'sampled-out', longContextRollConsumed: true };
@@ -344,13 +354,19 @@ export interface SurveyEventCoreFields {
 
 export interface SurveyEventEnvironmentFields {
   readonly current_model: string;
-  readonly user_turn_count: number;
+  readonly kfc_model_id?: string;
+  readonly kfc_trace_id?: string;
+  readonly user_turn_count?: number;
   readonly cumulative_tokens: number;
   readonly virtual_context_tokens: number;
   readonly tool_call_count: number;
   readonly compaction_count: number;
   readonly permission_mode: string;
   readonly thinking_effort: string;
+  readonly subagent_count: number;
+  readonly subagent_models?: string;
+  readonly swarm_run_count: number;
+  readonly swarm_models?: string;
 }
 
 export function buildSurveyEventProperties(

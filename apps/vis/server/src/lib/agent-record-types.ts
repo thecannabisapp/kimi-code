@@ -33,12 +33,12 @@ import type {
   ExportSessionManifest,
   FileHistoryCheckpointed,
   FileHistoryTracked,
+  Forked,
   FullCompactionBegin,
   FullCompactionCancel,
   FullCompactionComplete,
   GoalClear,
   GoalCreate,
-  GoalForked,
   GoalUpdate,
   InteractionRequestEvent,
   InteractionResolvedEvent,
@@ -52,9 +52,13 @@ import type {
   PlanRevision,
   PluginSessionStartEvent,
   PromptAborted,
-  PromptAccepted,
   PromptCompleted,
   PromptSteered,
+  SubagentCancelled,
+  SubagentCompleted,
+  SubagentFailed,
+  SubagentSpawned,
+  SubagentStarted,
   TaskStarted,
   TaskTerminated,
   TaskWaitDelivered,
@@ -129,6 +133,16 @@ export interface StaleGuardClearedRecord {
   readonly time?: number;
 }
 
+/** v2-dropped durable record: removed with the loop-side prompt admission
+ *  facility, but old wires still contain it. */
+export interface PromptAcceptedRecord {
+  readonly type: 'prompt.accepted';
+  readonly agentId: string;
+  readonly promptId: string;
+  readonly content?: unknown;
+  readonly time?: number;
+}
+
 /** The wire file header record. Declared locally (rather than via v2's
  *  `WireMetadataRecord`) so the union member keeps concrete field types —
  *  the upstream interface carries an index signature that would widen
@@ -160,7 +174,7 @@ export type AgentRecord =
   | WireRecordOf<'cron.delete', CronDeletePayload>
   | WireRecordOf<'file_history.checkpoint', FileHistoryCheckpointed>
   | WireRecordOf<'file_history.tracked', FileHistoryTracked>
-  | WireRecordOf<'forked', GoalForked>
+  | WireRecordOf<'forked', Forked>
   | WireRecordOf<'full_compaction.begin', FullCompactionBegin>
   | WireRecordOf<'full_compaction.cancel', FullCompactionCancel>
   | WireRecordOf<'full_compaction.complete', FullCompactionComplete>
@@ -182,10 +196,15 @@ export type AgentRecord =
   | WireRecordOf<'plugin.session_start', PluginSessionStartEvent>
   | WireRecordOf<'profile.bind', ProfileBind>
   | WireRecordOf<'prompt.aborted', PromptAborted>
-  | WireRecordOf<'prompt.accepted', PromptAccepted>
+  | PromptAcceptedRecord
   | WireRecordOf<'prompt.completed', PromptCompleted>
   | WireRecordOf<'prompt.steered', PromptSteered>
   | WireRecordOf<'runtime.set_binding', RuntimeSetBinding>
+  | WireRecordOf<'subagent.cancelled', SubagentCancelled>
+  | WireRecordOf<'subagent.completed', SubagentCompleted>
+  | WireRecordOf<'subagent.failed', SubagentFailed>
+  | WireRecordOf<'subagent.spawned', SubagentSpawned>
+  | WireRecordOf<'subagent.started', SubagentStarted>
   | WireRecordOf<'swarm_mode.enter', SwarmModeEnter>
   | WireRecordOf<'swarm_mode.exit', SwarmModeExit>
   | WireRecordOf<'task.started', TaskStarted>

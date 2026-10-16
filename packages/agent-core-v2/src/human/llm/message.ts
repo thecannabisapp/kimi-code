@@ -7,9 +7,17 @@ export interface ToolDescription {
 
 export type Role = 'system' | 'user' | 'assistant' | 'tool';
 
+export type TextPartMeta = {
+  source?: string;
+  contentType?: string;
+  activationId?: string;
+  [key: string]: unknown;
+};
+
 export interface TextPart {
   type: 'text';
   text: string;
+  meta?: TextPartMeta;
 }
 
 export interface ThinkPart {
@@ -17,6 +25,8 @@ export interface ThinkPart {
   think: string;
   encrypted?: string;
   detailsIndex?: number;
+  hidden?: boolean;
+  reasoningKey?: string;
 }
 
 export interface ImageURLPart {
@@ -107,6 +117,12 @@ export function mergeInPlace(target: StreamedMessagePart, source: StreamedMessag
     if (target.detailsIndex !== source.detailsIndex) {
       return false;
     }
+    if (target.hidden !== source.hidden) {
+      return false;
+    }
+    if (target.reasoningKey !== source.reasoningKey) {
+      return false;
+    }
     target.think += source.think;
     if (source.encrypted !== undefined) {
       target.encrypted = source.encrypted;
@@ -171,7 +187,7 @@ export function isVacuousContentPart(part: ContentPart): boolean {
     case 'text':
       return part.text.trim().length === 0;
     case 'think':
-      return part.encrypted === undefined && part.think.trim().length === 0;
+      return part.encrypted === undefined && part.hidden !== true && part.think.trim().length === 0;
     case 'image_url':
     case 'audio_url':
     case 'video_url':

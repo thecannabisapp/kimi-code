@@ -72,6 +72,7 @@ import type { UsageStatus } from '@moonshot-ai/agent-core-v2/agent/usage/usage';
 import type { FinishReason } from '@moonshot-ai/agent-core-v2/human/llm/finish-reason';
 import type { TokenUsage } from '@moonshot-ai/agent-core-v2/human/llm/usage';
 import type {
+  SubagentCancelledPayload,
   SubagentCompletedPayload,
   SubagentFailedPayload,
   SubagentSpawnedPayload,
@@ -372,7 +373,6 @@ export const kimiErrorCodeSchema = z.enum([
   'request.prompt_input_empty',
   'prompt.id_conflict',
   'prompt.not_found',
-  'prompt.already_completed',
   'session.busy',
   'shell.git_bash_not_found',
   'workspace.not_found',
@@ -487,16 +487,6 @@ export const agentPhaseSchema = z.discriminatedUnion('kind', [
     turnId: z.number(),
     step: z.number(),
     stepId: z.string(),
-    since: z.number(),
-  }),
-  z.object({
-    kind: z.literal('streaming'),
-    turnId: z.number(),
-    step: z.number(),
-    stepId: z.string(),
-    stream: z.enum(['assistant', 'thinking', 'tool_call']),
-    toolCallId: z.string().optional(),
-    toolName: z.string().optional(),
     since: z.number(),
   }),
   z.object({
@@ -761,6 +751,7 @@ export const turnEndedEventSchema = z.object({
   interruptReason: z
     .enum(['user_cancelled', 'aborted', 'max_steps', 'error', 'filtered', 'blocked'])
     .optional(),
+  traceId: z.string().optional(),
 });
 
 export const turnStepStartedEventSchema = z.object({
@@ -940,6 +931,11 @@ export const subagentFailedEventSchema = z.object({
   error: z.string(),
 }) satisfies z.ZodType<SubagentFailedPayload>;
 
+export const subagentCancelledEventSchema = z.object({
+  type: z.literal('subagent.cancelled'),
+  subagentId: z.string(),
+}) satisfies z.ZodType<SubagentCancelledPayload>;
+
 export const compactionStartedEventSchema = z.object({
   type: z.literal('compaction.started'),
   agentId: z.string(),
@@ -1099,6 +1095,7 @@ export const agentEventSchema = z.discriminatedUnion('type', [
   subagentSuspendedEventSchema,
   subagentCompletedEventSchema,
   subagentFailedEventSchema,
+  subagentCancelledEventSchema,
   compactionStartedEventSchema,
   compactionBlockedEventSchema,
   compactionCancelledEventSchema,

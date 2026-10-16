@@ -150,6 +150,7 @@ export function toModelsDevProviderItem(
       return {
         ...base,
         wire_type: resolution.wire,
+        base_url: resolution.baseUrl ?? null,
         guessed: resolution.guessed,
         needs_base_url: false,
         rejected: false,
@@ -159,6 +160,7 @@ export function toModelsDevProviderItem(
       return {
         ...base,
         wire_type: resolution.wire,
+        base_url: null,
         guessed: resolution.guessed,
         needs_base_url: true,
         rejected: false,
@@ -168,6 +170,7 @@ export function toModelsDevProviderItem(
       return {
         ...base,
         wire_type: null,
+        base_url: null,
         guessed: false,
         needs_base_url: false,
         rejected: true,

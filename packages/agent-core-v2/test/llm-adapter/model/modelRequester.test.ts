@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 
 import { isError2 } from '#/_base/errors/errors';
+import {
+  createOAuthCredentialProvider,
+  createStaticCredentialProvider,
+} from '#human/credentials/credentials';
 import type { ProviderMediaContribution } from '#human/llm/media/upload';
 import type { LlmModel } from '#human/llm/model';
 import type {
@@ -83,7 +87,7 @@ function textStream(emit: (event: LlmRequestEvent) => void, text = 'hello'): voi
   ]);
 }
 
-function modelWith(authProvider: Model['authProvider']): Model {
+function modelWith(credentialProvider: Model['credentialProvider']): Model {
   return {
     id: 'm1',
     name: 'fake-model',
@@ -102,14 +106,9 @@ function modelWith(authProvider: Model['authProvider']): Model {
     alwaysThinking: false,
     providerType: 'fake',
     providerName: 'fake',
-    authProvider,
+    credentialProvider,
   };
 }
-
-const staticAuth = (apiKey?: string): Model['authProvider'] => ({
-  canRefresh: false,
-  getAuth: () => Promise.resolve(apiKey === undefined ? undefined : { apiKey }),
-});
 
 async function collect(stream: AsyncIterable<ModelRequestEvent>): Promise<ModelRequestEvent[]> {
   const events: ModelRequestEvent[] = [];
@@ -123,7 +122,10 @@ describe('ModelRequesterImpl request execution', () => {
   it('maps ModelRequestParams onto LlmRequestConfig, content and control', async () => {
     const requester = new FakeLlmRequester();
     requester.handler = (_i, emit) => textStream(emit);
-    const impl = new ModelRequesterImpl(modelWith(staticAuth('sk-1')), gatewayReturning(requester));
+    const impl = new ModelRequesterImpl(
+      modelWith(createStaticCredentialProvider('sk-1')),
+      gatewayReturning(requester),
+    );
     const signal = AbortSignal.timeout(1000);
     const messages: Message[] = [
       {
@@ -198,7 +200,10 @@ describe('ModelRequesterImpl request execution', () => {
   it('omits the thinking intent when no effort is requested', async () => {
     const requester = new FakeLlmRequester();
     requester.handler = (_i, emit) => textStream(emit);
-    const impl = new ModelRequesterImpl(modelWith(staticAuth()), gatewayReturning(requester));
+    const impl = new ModelRequesterImpl(
+      modelWith(createStaticCredentialProvider()),
+      gatewayReturning(requester),
+    );
     await collect(impl.request(INPUT));
     expect(requester.calls[0]?.config.thinking).toBeUndefined();
     expect(requester.calls[0]?.config.extraParams).toBeUndefined();
@@ -225,7 +230,10 @@ describe('ModelRequesterImpl request execution', () => {
         { type: 'llm.done' },
       ]);
     const traceIds: Array<string | null> = [];
-    const impl = new ModelRequesterImpl(modelWith(staticAuth()), gatewayReturning(requester));
+    const impl = new ModelRequesterImpl(
+      modelWith(createStaticCredentialProvider()),
+      gatewayReturning(requester),
+    );
     const events = await collect(
       impl.request(INPUT, undefined, { onTraceId: (id) => traceIds.push(id) }),
     );
@@ -261,46 +269,7 @@ describe('ModelRequesterImpl request execution', () => {
     expect(traceIds).toEqual(['trace-1']);
   });
 
-  it('replays once after a forced token refresh on 401', async () => {
-    const requester = new FakeLlmRequester();
-    requester.handler = (callIndex, emit) => {
-      if (callIndex === 0) {
-        emit({
-          type: 'llm.failed.remote',
-          error: {
-            kind: 'status',
-            statusCode: 401,
-            message: 'unauthorized',
-            requestId: null,
-            retryAfterMs: null,
-            headers: null,
-          },
-        });
-        return;
-      }
-      textStream(emit, 'ok');
-    };
-    const authCalls: Array<{ force?: boolean }> = [];
-    const impl = new ModelRequesterImpl(
-      modelWith({
-        canRefresh: true,
-        getAuth: (options) => {
-          authCalls.push(options ?? {});
-          return Promise.resolve({ apiKey: authCalls.length === 1 ? 'tok-1' : 'tok-2' });
-        },
-      }),
-      gatewayReturning(requester),
-    );
-
-    const events = await collect(impl.request(INPUT));
-    expect(events.some((e) => e.type === 'finish')).toBe(true);
-    expect(requester.calls).toHaveLength(2);
-    expect(requester.calls[0]?.config.model.apiKey).toBe('tok-1');
-    expect(requester.calls[1]?.config.model.apiKey).toBe('tok-2');
-    expect(authCalls).toEqual([{ force: undefined }, { force: true }]);
-  });
-
-  it('surfaces a replay-surviving 401 as provider.auth_error', async () => {
+  it('surfaces a 401 as provider.auth_error without replaying', async () => {
     const requester = new FakeLlmRequester();
     requester.handler = (_i, emit) =>
       emit({
@@ -315,10 +284,7 @@ describe('ModelRequesterImpl request execution', () => {
         },
       });
     const impl = new ModelRequesterImpl(
-      modelWith({
-        canRefresh: true,
-        getAuth: () => Promise.resolve({ apiKey: 'tok' }),
-      }),
+      modelWith(createOAuthCredentialProvider(() => Promise.resolve('tok'))),
       gatewayReturning(requester),
     );
 
@@ -326,10 +292,10 @@ describe('ModelRequesterImpl request execution', () => {
     expect(isError2(failure)).toBe(true);
     expect((failure as { code: string }).code).toBe(PROVIDER_AUTH_ERROR_CODE);
     expect((failure as Error).message).toContain('account rejected');
-    expect(requester.calls).toHaveLength(2);
+    expect(requester.calls).toHaveLength(1);
   });
 
-  it('does not replay 401s against a non-refreshable auth provider', async () => {
+  it('does not replay 401s against static credentials', async () => {
     const requester = new FakeLlmRequester();
     requester.handler = (_i, emit) =>
       emit({
@@ -344,7 +310,7 @@ describe('ModelRequesterImpl request execution', () => {
         },
       });
     const impl = new ModelRequesterImpl(
-      modelWith(staticAuth('sk-bad')),
+      modelWith(createStaticCredentialProvider('sk-bad')),
       gatewayReturning(requester),
     );
 
@@ -367,7 +333,10 @@ describe('ModelRequesterImpl request execution', () => {
           headers: null,
         },
       });
-    const impl = new ModelRequesterImpl(modelWith(staticAuth()), gatewayReturning(requester));
+    const impl = new ModelRequesterImpl(
+      modelWith(createStaticCredentialProvider()),
+      gatewayReturning(requester),
+    );
     const failure = await collect(impl.request(INPUT)).catch((error: unknown) => error);
     expect((failure as { code: string }).code).toBe(PROVIDER_API_ERROR_CODE);
 
@@ -394,7 +363,7 @@ describe('ModelRequesterImpl request execution', () => {
   it('uploadVideo presence is the capability declaration', async () => {
     const requester = new FakeLlmRequester();
     const impl = new ModelRequesterImpl(
-      modelWith(staticAuth('sk-1')),
+      modelWith(createStaticCredentialProvider('sk-1')),
       gatewayReturning(requester),
     );
     await expect(impl.uploadVideo('file-id')).rejects.toThrow(/does not support video upload/);
@@ -410,11 +379,40 @@ describe('ModelRequesterImpl request execution', () => {
       },
     };
     const withMedia = new ModelRequesterImpl(
-      modelWith(staticAuth('sk-1')),
+      modelWith(createStaticCredentialProvider('sk-1')),
       gatewayReturning(requester, media),
     );
     const part = await withMedia.uploadVideo({ data: new Uint8Array([1]), mimeType: 'video/mp4' });
     expect(part).toEqual({ type: 'video_url', videoUrl: { url: 'https://cdn.example.test/v.mp4' } });
+    expect(seen).toEqual(['sk-1']);
+  });
+
+  it('uploadImage presence is the capability declaration', async () => {
+    const requester = new FakeLlmRequester();
+    const impl = new ModelRequesterImpl(
+      modelWith(createStaticCredentialProvider('sk-1')),
+      gatewayReturning(requester),
+    );
+    await expect(
+      impl.uploadImage({ data: new Uint8Array([1]), mimeType: 'image/png' }),
+    ).rejects.toThrow(/does not support image upload/);
+
+    const seen: Array<string | undefined> = [];
+    const media: ProviderMediaContribution = {
+      uploadImage: (_image, options) => {
+        seen.push(options.model.apiKey);
+        return Promise.resolve({
+          type: 'image_url',
+          imageUrl: { url: 'ms://img-1', id: 'img-1' },
+        });
+      },
+    };
+    const withMedia = new ModelRequesterImpl(
+      modelWith(createStaticCredentialProvider('sk-1')),
+      gatewayReturning(requester, media),
+    );
+    const part = await withMedia.uploadImage({ data: new Uint8Array([1]), mimeType: 'image/png' });
+    expect(part).toEqual({ type: 'image_url', imageUrl: { url: 'ms://img-1', id: 'img-1' } });
     expect(seen).toEqual(['sk-1']);
   });
 
@@ -429,7 +427,10 @@ describe('ModelRequesterImpl request execution', () => {
       emit({ type: 'llm.streaming.finish', finish: { finishReason: 'completed', rawFinishReason: 'stop' } });
       emit({ type: 'llm.done' });
     };
-    const impl = new ModelRequesterImpl(modelWith(staticAuth()), gatewayReturning(requester));
+    const impl = new ModelRequesterImpl(
+      modelWith(createStaticCredentialProvider()),
+      gatewayReturning(requester),
+    );
     const events = await collect(impl.request(INPUT));
     const timing = events.find((event) => event.type === 'timing');
     expect(timing).toBeDefined();
