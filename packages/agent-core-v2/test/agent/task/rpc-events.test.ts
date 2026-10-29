@@ -1162,11 +1162,14 @@ describe('AgentTaskService — notification delivery', () => {
       await manager.reconcile();
 
       expect(agent.context.appendUserMessage).toHaveBeenCalledTimes(1);
-      await vi.waitFor(async () => {
-        await expect(persistence.readTask('agent-hist0000')).resolves.toMatchObject({
-          resumeReminded: true,
-        });
-      });
+      await vi.waitFor(
+        async () => {
+          await expect(persistence.readTask('agent-hist0000')).resolves.toMatchObject({
+            resumeReminded: true,
+          });
+        },
+        { timeout: 10_000 },
+      );
     } finally {
       await cleanupSessionDir(sessionDir, fixture);
     }
@@ -1209,11 +1212,14 @@ describe('AgentTaskService — notification delivery', () => {
             message.origin.variant === 'task_resume_termination',
         ),
       ).toEqual([]);
-      await vi.waitFor(async () => {
-        await expect(persistence.readTask('agent-old00000')).resolves.toMatchObject({
-          resumeReminded: true,
-        });
-      });
+      await vi.waitFor(
+        async () => {
+          await expect(persistence.readTask('agent-old00000')).resolves.toMatchObject({
+            resumeReminded: true,
+          });
+        },
+        { timeout: 10_000 },
+      );
     } finally {
       await cleanupSessionDir(sessionDir, fixture);
     }

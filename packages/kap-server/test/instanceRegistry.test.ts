@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   createInstanceRegistry,
@@ -23,8 +23,8 @@ beforeEach(() => {
   instancesDir = join(tmpDir, 'instances');
 });
 
-afterEach(() => {
-  rmSync(tmpDir, { recursive: true, force: true });
+afterEach(async () => {
+  await removeDir(tmpDir);
 });
 
 interface DiskInstance {
@@ -57,6 +57,18 @@ function readInstance(serverId: string): DiskInstance {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolvePromise) => setTimeout(resolvePromise, ms));
+}
+
+async function removeDir(path: string): Promise<void> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      rmSync(path, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      if (attempt >= 4 || (error as NodeJS.ErrnoException).code !== 'ENOTEMPTY') throw error;
+      await sleep(50);
+    }
+  }
 }
 
 const baseInfo = {
@@ -200,20 +212,23 @@ describe('createInstanceRegistry — heartbeat', () => {
     let tick = 0;
     const registry = createInstanceRegistry({
       instancesDir,
-      heartbeatIntervalMs: 1,
+      heartbeatIntervalMs: 20,
       now: () => ++tick,
     });
     const reg = await registry.register(baseInfo);
-    const first = readInstance(reg.serverId).heartbeat_at;
+    try {
+      const first = readInstance(reg.serverId).heartbeat_at;
+      await vi.waitFor(() => {
+        expect(readInstance(reg.serverId).heartbeat_at).toBeGreaterThan(first);
+      }, { timeout: 15_000 });
 
-    await sleep(90);
-    const later = readInstance(reg.serverId).heartbeat_at;
-    expect(later).toBeGreaterThan(first);
-
-    await reg.release();
-    expect(existsSync(join(instancesDir, `${reg.serverId}.json`))).toBe(false);
-    await sleep(30);
-    expect(existsSync(join(instancesDir, `${reg.serverId}.json`))).toBe(false);
+      await reg.release();
+      expect(existsSync(join(instancesDir, `${reg.serverId}.json`))).toBe(false);
+      await sleep(30);
+      expect(existsSync(join(instancesDir, `${reg.serverId}.json`))).toBe(false);
+    } finally {
+      await reg.release();
+    }
   });
 });
 
@@ -247,46 +262,64 @@ describe('convenience readers', () => {
 
 describe('startServer — instance registry wiring', () => {
   let home: string | undefined;
-  const servers: RunningServer[] = [];
+  const starting: Promise<RunningServer>[] = [];
+  const active = new Set<RunningServer>();
+
+  function launch(): Promise<RunningServer> {
+    const started = startServer({
+      hostIdentity: TEST_HOST_IDENTITY,
+      host: '127.0.0.1',
+      port: 0,
+      homeDir: home as string,
+      logLevel: 'silent',
+    }).then((server) => {
+      active.add(server);
+      return server;
+    });
+    started.catch(() => {});
+    starting.push(started);
+    return started;
+  }
+
+  async function closeServer(server: RunningServer): Promise<void> {
+    active.delete(server);
+    await server.close();
+  }
 
   afterEach(async () => {
-    while (servers.length > 0) {
-      await servers.pop()!.close();
+    await Promise.allSettled(starting.splice(0));
+    for (const server of [...active]) {
+      await closeServer(server);
     }
     if (home !== undefined) {
-      rmSync(home, { recursive: true, force: true });
+      await removeDir(home);
       home = undefined;
     }
   });
 
   it('lets two servers share one homeDir, each registering a distinct instance and port', async () => {
     home = mkdtempSync(join(tmpdir(), 'kimi-server-multi-server-'));
-    const a = await startServer({ hostIdentity: TEST_HOST_IDENTITY, host: '127.0.0.1', port: 0, homeDir: home, logLevel: 'silent' });
-    servers.push(a);
-    const b = await startServer({ hostIdentity: TEST_HOST_IDENTITY, host: '127.0.0.1', port: 0, homeDir: home, logLevel: 'silent' });
-    servers.push(b);
+    const a = await launch();
+    const b = await launch();
 
     expect(b.port).not.toBe(a.port);
 
     const live = await listLiveServerInstances(home);
     expect(live).toHaveLength(2);
     expect(new Set(live.map((i) => i.serverId)).size).toBe(2);
-    expect(live.map((i) => i.port).sort((x, y) => x - y)).toEqual(
-      [a.port, b.port].sort((x, y) => x - y),
+    expect(live.map((i) => i.port).toSorted((x, y) => x - y)).toEqual(
+      [a.port, b.port].toSorted((x, y) => x - y),
     );
     expect(existsSync(join(home, 'server', 'lock'))).toBe(false);
   });
 
   it('removes its instance file on close so peers no longer list it', async () => {
     home = mkdtempSync(join(tmpdir(), 'kimi-server-multi-server-'));
-    const a = await startServer({ hostIdentity: TEST_HOST_IDENTITY, host: '127.0.0.1', port: 0, homeDir: home, logLevel: 'silent' });
-    servers.push(a);
-    const b = await startServer({ hostIdentity: TEST_HOST_IDENTITY, host: '127.0.0.1', port: 0, homeDir: home, logLevel: 'silent' });
-    servers.push(b);
+    const a = await launch();
+    const b = await launch();
     expect(await listLiveServerInstances(home)).toHaveLength(2);
 
-    await a.close();
-    servers.splice(servers.indexOf(a), 1);
+    await closeServer(a);
 
     const live = await listLiveServerInstances(home);
     expect(live).toHaveLength(1);
@@ -295,23 +328,10 @@ describe('startServer — instance registry wiring', () => {
 
   it('releases its registration on close so a fresh instance on the same home can start', async () => {
     home = mkdtempSync(join(tmpdir(), 'kimi-server-multi-server-'));
-    const first = await startServer({
-      hostIdentity: TEST_HOST_IDENTITY,
-      host: '127.0.0.1',
-      port: 0,
-      homeDir: home,
-      logLevel: 'silent',
-    });
-    await first.close();
+    const first = await launch();
+    await closeServer(first);
 
-    const restarted = await startServer({
-      hostIdentity: TEST_HOST_IDENTITY,
-      host: '127.0.0.1',
-      port: 0,
-      homeDir: home,
-      logLevel: 'silent',
-    });
-    servers.push(restarted);
+    const restarted = await launch();
     expect(await listLiveServerInstances(home)).toHaveLength(1);
     expect((await listLiveServerInstances(home))[0]?.port).toBe(restarted.port);
   });

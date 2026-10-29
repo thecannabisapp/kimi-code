@@ -230,6 +230,7 @@ import type { EnvironmentDisclosureSnapshot } from '#/app/agentProfileCatalog/ag
 import { ISessionSkillCatalog } from '#/features/skill/session/skillCatalog';
 import { ISessionSwarmService } from '#/features/swarm/session/sessionSwarm';
 import type { PathAccessOperation } from '#/session/workspaceContext/workspaceContext';
+import { setWatchEnabled } from '#/human/utils/watch';
 
 import { stubAgentIdentity } from '../app/agentIdentity/stubs';
 import { stubClientIdentity } from '../app/bootstrap/stubs';
@@ -243,6 +244,8 @@ import {
   type EventSnapshotEntry,
   type WireSnapshotEntry,
 } from './snapshots';
+
+setWatchEnabled(false);
 
 const TEST_HOME_DIR = '/home/test';
 

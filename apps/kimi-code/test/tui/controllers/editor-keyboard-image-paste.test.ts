@@ -32,6 +32,10 @@ import { ImageAttachmentStore } from '#/tui/utils/image-attachment-store';
 import { parseImageMeta } from '#/utils/image/image-mime';
 import { ImageLimits, type KimiHarness } from '@moonshot-ai/kimi-code-sdk';
 
+// Pure-JS Jimp decode/encode of 3600×1800 frames runs long on slow CI runners;
+// give the whole file headroom instead of shrinking the fixtures.
+vi.setConfig({ testTimeout: 20_000 });
+
 // vitest hoists vi.mock/vi.hoisted above the imports above, so the mock still
 // applies to the editor-keyboard module that pulls in readClipboardMedia.
 const { readClipboardMedia } = vi.hoisted(() => ({ readClipboardMedia: vi.fn() }));

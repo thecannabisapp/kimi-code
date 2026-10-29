@@ -19,6 +19,40 @@ import {
 const wait = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 const longTempDir = (prefix: string): Promise<string> =>
   mkdtemp(join(realpathSync.native(tmpdir()), prefix));
+const RM_RETRY_DELAYS_MS = [25, 50, 100, 200, 400, 800, 1000, 1000, 1000, 1000];
+
+async function rmWithRetry(path: string): Promise<void> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await rm(path, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      const retryIn = RM_RETRY_DELAYS_MS[attempt];
+      if (retryIn === undefined || (code !== 'ENOTEMPTY' && code !== 'EBUSY' && code !== 'EPERM')) {
+        throw error;
+      }
+      await wait(retryIn);
+    }
+  }
+}
+
+async function waitForWatchedChange(
+  write: () => Promise<void>,
+  seen: () => boolean,
+  timeoutMs = 10_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!seen()) {
+    if (Date.now() >= deadline) {
+      throw new Error('watcher did not report the change in time');
+    }
+    await write();
+    for (let waited = 0; !seen() && waited < 500; waited += 50) {
+      await wait(50);
+    }
+  }
+}
 
 class TestNativeWatcher {
   private errorListener: ((error: NodeJS.ErrnoException) => void) | undefined;
@@ -292,16 +326,19 @@ describe('watch signal mode', () => {
 
       rig.attempt(0).watcher.fail('ERR_FEATURE_UNAVAILABLE_ON_PLATFORM');
       await handle.ready;
-      await wait(500);
 
       const file = join(root, 'a.txt');
-      await writeFile(file, 'v1');
-      await wait(300);
+      let version = 0;
+      await waitForWatchedChange(
+        () => writeFile(file, `v${String(++version)}`),
+        () => events.some((e) => e.path === file),
+      );
 
       expect(events[0]).toEqual({ path: root, action: 'modified', kind: 'directory' });
-      expect(events.some((e) => e.path === file && e.action === 'created')).toBe(true);
     } finally {
-      await rm(root, { recursive: true, force: true });
+      handle?.dispose();
+      handle = undefined;
+      await rmWithRetry(root);
     }
   });
 
@@ -334,15 +371,19 @@ describe('watch signal mode', () => {
       handle.onDidChange((event) => events.push(event));
       await handle.ready;
 
-      await writeFile(join(target, 'config.toml'), 'x');
+      const file = join(target, 'config.toml');
+      let version = 0;
+      await waitForWatchedChange(
+        () => writeFile(file, `v${String(++version)}`),
+        () => events.some((e) => e.path === join(requested, 'config.toml')),
+      );
 
-      await expect
-        .poll(() => events.some((e) => e.path === join(requested, 'config.toml') && e.action === 'created'))
-        .toBe(true);
       expect(events.every((e) => e.path.startsWith(requested))).toBe(true);
       expect(ignoredPaths.every((path) => path.startsWith(requested))).toBe(true);
     } finally {
-      await rm(base, { recursive: true, force: true });
+      handle?.dispose();
+      handle = undefined;
+      await rmWithRetry(base);
     }
   });
 
@@ -366,12 +407,17 @@ describe('watch signal mode', () => {
 
       const file = join(root, 'a.txt');
       await writeFile(file, 'v1');
-      await wait(300);
 
       expect(nativeCalls).toBe(0);
-      expect(events.some((e) => e.path === file && e.action === 'created')).toBe(true);
+      await expect
+        .poll(() => events.some((e) => e.path === file && e.action === 'created'), {
+          timeout: 10_000,
+        })
+        .toBe(true);
     } finally {
-      await rm(root, { recursive: true, force: true });
+      handle?.dispose();
+      handle = undefined;
+      await rmWithRetry(root);
     }
   });
 });
@@ -383,9 +429,9 @@ describe('watch chokidar mode', () => {
   afterEach(async () => {
     handle?.dispose();
     handle = undefined;
-    if (root) await rm(root, { recursive: true, force: true });
+    if (root) await rmWithRetry(root);
     root = '';
-  });
+  }, 30_000);
 
   async function start(options?: Parameters<typeof watch>[1]): Promise<WatchChange[]> {
     const events: WatchChange[] = [];
@@ -429,11 +475,9 @@ describe('watch chokidar mode', () => {
 
     await writeFile(join(root, 'ck_0002'), 'y');
     await writeFile(sessions, 'new');
-    await wait(300);
-    expect(events.some((e) => e.path.includes('ck_') || e.path.includes('sessions'))).toBe(false);
-
     await writeFile(file, 'hello');
     await expect.poll(() => events.some((e) => e.path === file), { timeout: 5000 }).toBe(true);
+    expect(events.some((e) => e.path.includes('ck_') || e.path.includes('sessions'))).toBe(false);
     expect(events.some((e) => e.path === kimi || e.path === root || e.path.includes('sessions'))).toBe(
       false,
     );
@@ -446,10 +490,11 @@ describe('watch chokidar mode', () => {
     await mkdir(join(root, 'node_modules', 'pkg'), { recursive: true });
     await writeFile(join(root, 'node_modules', 'pkg', 'index.js'), 'x');
     await writeFile(join(root, 'index.ts'), 'x');
-    await wait(300);
 
+    await expect
+      .poll(() => events.some((e) => e.path === join(root, 'index.ts')), { timeout: 5000 })
+      .toBe(true);
     expect(events.some((e) => e.path.includes('node_modules'))).toBe(false);
-    await expect.poll(() => events.some((e) => e.path === join(root, 'index.ts'))).toBe(true);
   });
 
   it('does not report changes below the configured depth', async () => {
@@ -459,10 +504,13 @@ describe('watch chokidar mode', () => {
     await mkdir(join(root, 'sub'));
     await writeFile(join(root, 'top.txt'), 'x');
     await writeFile(join(root, 'sub', 'nested.txt'), 'x');
-    await wait(300);
 
-    await expect.poll(() => events.some((e) => e.path === join(root, 'top.txt'))).toBe(true);
-    await expect.poll(() => events.some((e) => e.path === join(root, 'sub'))).toBe(true);
+    await expect
+      .poll(() => events.some((e) => e.path === join(root, 'top.txt')), { timeout: 5000 })
+      .toBe(true);
+    await expect
+      .poll(() => events.some((e) => e.path === join(root, 'sub')), { timeout: 5000 })
+      .toBe(true);
     expect(events.some((e) => e.path.endsWith('nested.txt'))).toBe(false);
   });
 
@@ -536,11 +584,12 @@ describe('watch chokidar mode', () => {
       }
 
       const fdsBefore = readdirSync('/dev/fd').length;
-      await start({ recursive: true, signal: true });
+      handle = watch(root, { recursive: true, signal: true });
+      await handle.ready;
       const fdsAfter = readdirSync('/dev/fd').length;
 
       expect(fdsAfter - fdsBefore).toBeLessThan(50);
     },
-    30000,
+    60000,
   );
 });

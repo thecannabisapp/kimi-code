@@ -23,6 +23,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   MAX_REVIEW_ROUNDS,
+  INBOX_DIR,
   STATE_FILE,
   TowerProtocolError,
   TowerStore,
@@ -49,6 +50,24 @@ vi.mock('node:fs/promises', async (importOriginal) => {
 });
 
 const execFileAsync = promisify(execFile);
+
+const RM_RETRY_DELAYS_MS = [25, 50, 100, 200, 400];
+
+async function rmWithRetry(path: string): Promise<void> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await rm(path, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      const retryIn = RM_RETRY_DELAYS_MS[attempt];
+      if (retryIn === undefined || (code !== 'ENOTEMPTY' && code !== 'EBUSY' && code !== 'EPERM')) {
+        throw error;
+      }
+      await delay(retryIn);
+    }
+  }
+}
 
 async function git(cwd: string, ...args: string[]): Promise<string> {
   const { stdout } = await execFileAsync('git', args, { cwd });
@@ -81,7 +100,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-  await rm(repo, { recursive: true, force: true });
+  await rmWithRetry(repo);
 });
 
 function rosterEntry(partial: Partial<TowerRosterEntry> & Pick<TowerRosterEntry, 'name' | 'kind'>): TowerRosterEntry {
@@ -153,7 +172,7 @@ describe('init in a non-git directory', () => {
       expect(await git(dir, 'log', '-1', '--format=%s')).toBe('tower: init');
       expect(await git(dir, 'status', '--porcelain')).toBe('');
     } finally {
-      await rm(dir, { recursive: true, force: true });
+      await rmWithRetry(dir);
     }
   });
 
@@ -171,7 +190,7 @@ describe('init in a non-git directory', () => {
       expect(await git(dir, 'ls-files')).toContain('src/app.ts');
       expect(await git(dir, 'status', '--porcelain')).toBe('');
     } finally {
-      await rm(dir, { recursive: true, force: true });
+      await rmWithRetry(dir);
     }
   });
 });
@@ -2301,7 +2320,7 @@ describe('rebaseMission', () => {
       );
     } finally {
       process.env['PATH'] = previousPath;
-      await rm(wrapperDir, { recursive: true, force: true });
+      await rmWithRetry(wrapperDir);
     }
     expect((await store.load()).missions.find((candidate) => candidate.id === mission.id)?.lastRebase).toBeUndefined();
   });
@@ -2355,7 +2374,7 @@ describe('rebaseMission', () => {
       await expect(store.rebaseMission('tower', mission.id)).rejects.toThrow(/recovery-required/);
     } finally {
       process.env['PATH'] = previousPath;
-      await rm(wrapperDir, { recursive: true, force: true });
+      await rmWithRetry(wrapperDir);
     }
 
     const after = (await store.load()).missions.find((candidate) => candidate.id === mission.id)!;
@@ -3719,7 +3738,7 @@ describe('teardown', () => {
 
       expect(report).toEqual([`removed .tower/worktrees/${mission!.worktree}`]);
     } finally {
-      await rm(nlRepo, { recursive: true, force: true });
+      await rmWithRetry(nlRepo);
     }
   });
 
@@ -3823,7 +3842,7 @@ describe('teardown', () => {
       expect(report.join('\n')).toContain(`removed .tower/worktrees/${mission.worktree}`);
       await expect(stat(wt)).rejects.toThrow();
     } finally {
-      await rm(subRepo, { recursive: true, force: true });
+      await rmWithRetry(subRepo);
     }
   });
 
@@ -4160,15 +4179,26 @@ describe('state lock recovery and prepared writes', () => {
       expect(replacement).toContain('token=replacement');
 
       let contenderEntered = false;
+      const originalAcquire = aliasDriver.tryAcquireStateLock;
+      const blocked = deferred();
+      aliasDriver.tryAcquireStateLock = async (path, token) => {
+        const acquired = await originalAcquire.call(aliasStore, path, token);
+        if (!acquired) blocked.resolve();
+        return acquired;
+      };
       contender = aliasDriver.withStateLock(async () => {
         contenderEntered = true;
       });
-      await delay(20);
-      expect(contenderEntered).toBe(false);
-      expect(await readFile(lockPath, 'utf8')).toBe(replacement);
-      await realDriver.releaseStateLock(lockPath, 'replacement');
-      await contender;
-      expect(contenderEntered).toBe(true);
+      try {
+        await blocked.promise;
+        expect(contenderEntered).toBe(false);
+        expect(await readFile(lockPath, 'utf8')).toBe(replacement);
+        await realDriver.releaseStateLock(lockPath, 'replacement');
+        await contender;
+        expect(contenderEntered).toBe(true);
+      } finally {
+        aliasDriver.tryAcquireStateLock = originalAcquire;
+      }
     } finally {
       paused.resolve();
       realDriver.stateLockHolderIsDead = originalCheck;
@@ -4230,6 +4260,7 @@ describe('state lock recovery and prepared writes', () => {
   });
 
   it('sends without waiting for the state lock and preserves concurrent roster writes', async () => {
+    store = new TowerStore(repo, { stateLockTimeoutMs: 60_000 });
     await store.registerAgent(rosterEntry({ name: 'w1', kind: 'worker' }));
     const lockPath = `${store.abs(STATE_FILE)}.lock`;
     await writeFile(lockPath, `pid=${String(process.pid)} since=2026-09-26T00:00:00.000Z token=live`);
@@ -4242,7 +4273,7 @@ describe('state lock recovery and prepared writes', () => {
       await rm(lockPath, { force: true });
     }
 
-    const other = new TowerStore(repo);
+    const other = new TowerStore(repo, { stateLockTimeoutMs: 60_000 });
     const subjects = Array.from({ length: 16 }, (_, index) => `message-${String(index)}`);
     await Promise.all([
       ...subjects.map((subject) => store.send('tower', { to: 'w1', subject, body: subject })),
@@ -4257,7 +4288,7 @@ describe('state lock recovery and prepared writes', () => {
     ).toEqual(subjects.toSorted());
     const roster = (await store.load()).roster.agents.map((agent) => agent.name);
     expect(roster).toEqual(expect.arrayContaining(['w1', ...Array.from({ length: 8 }, (_, i) => `other-${String(i)}`)]));
-  });
+  }, 90_000);
 
   it('runs updateMission completion Git checks outside the state lock', async () => {
     const mission = await setupMission({
@@ -4487,15 +4518,31 @@ describe('state lock recovery and prepared writes', () => {
       }
       return original.call(store, state);
     };
+    type AcquireDriver = { tryAcquireStateLock(lockPath: string, token: string): Promise<boolean> };
+    const acquireDriver = store as unknown as AcquireDriver;
+    const originalAcquire = acquireDriver.tryAcquireStateLock;
+    const inboxLockPath = `${store.abs(INBOX_DIR)}.lock`;
+    let sendStarted = false;
+    let released = false;
+    const sendBlocked = deferred();
+    acquireDriver.tryAcquireStateLock = async (lockPath, token) => {
+      const acquired = await originalAcquire.call(store, lockPath, token);
+      if (sendStarted && !released && !acquired && lockPath === inboxLockPath) {
+        sendBlocked.resolve();
+      }
+      return acquired;
+    };
     const completing = store.complete('w1', 'completion report');
     let sending: Promise<string> | undefined;
     try {
       await paused.promise;
+      sendStarted = true;
       sending = store.send('tower', { to: 'w1', subject: 'last instruction', body: 'x' });
-      await delay(20);
+      await sendBlocked.promise;
       expect(
         (await store.readInbox('w1', 50)).some((item) => item.subject === 'last instruction'),
       ).toBe(false);
+      released = true;
       release.resolve();
       await completing;
       await sending;
@@ -4505,6 +4552,7 @@ describe('state lock recovery and prepared writes', () => {
     } finally {
       release.resolve();
       driver.save = original;
+      acquireDriver.tryAcquireStateLock = originalAcquire;
       await Promise.allSettled(
         sending === undefined ? [completing] : [completing, sending],
       );

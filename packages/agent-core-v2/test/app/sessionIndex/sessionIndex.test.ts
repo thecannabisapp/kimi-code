@@ -85,7 +85,7 @@ describe('FileSessionIndex (legacy)', () => {
   afterEach(async () => {
     disposeHost?.();
     disposeHost = undefined;
-    await fsp.rm(homeDir, { recursive: true, force: true });
+    await fsp.rm(homeDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });
 
   function build(
@@ -380,7 +380,7 @@ describe('FileSessionIndex (read model)', () => {
     disposeHost = undefined;
     await drainSessionIndexMirror();
     await drainQueryStoreDisposals();
-    await fsp.rm(homeDir, { recursive: true, force: true });
+    await fsp.rm(homeDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });
 
   function build(
@@ -981,7 +981,7 @@ describe('FileSessionIndex (read model)', () => {
     disposeHost = undefined;
     await drainSessionIndexMirror();
     await drainQueryStoreDisposals();
-    await fsp.rm(join(homeDir, 'cache', 'query-store'), { recursive: true, force: true });
+    await fsp.rm(join(homeDir, 'cache', 'query-store'), { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 
     const second = build();
     const fallback = await second.listRecent({ workspaceIds: [workspaceId] });
@@ -1322,7 +1322,7 @@ describe('FileSessionIndex (read model)', () => {
     disposeHost = undefined;
     await drainSessionIndexMirror();
     await drainQueryStoreDisposals();
-    await fsp.rm(join(homeDir, 'cache', 'query-store'), { recursive: true, force: true });
+    await fsp.rm(join(homeDir, 'cache', 'query-store'), { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 
     const second = build();
     (queryStore as GatedFlakyQueryStore).failNextBatch = true;
@@ -1664,7 +1664,7 @@ describe('FileSessionIndex (read model)', () => {
     disposeHost = undefined;
     await drainSessionIndexMirror();
     await drainQueryStoreDisposals();
-    await fsp.rm(join(homeDir, 'cache', 'query-store'), { recursive: true, force: true });
+    await fsp.rm(join(homeDir, 'cache', 'query-store'), { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 
     const second = buildWithDocs();
     const status = await second.store.prepare();

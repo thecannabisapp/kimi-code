@@ -1,10 +1,11 @@
-import { expect, test } from 'vitest';
+import { expect, test, vi } from 'vitest';
 import { tmpdir } from 'node:os';
 import type { EffectiveHistory } from '#/types';
-import { mkdtemp, writeFile, readFile, readdir, rm } from 'node:fs/promises';
+import { appendFile, mkdtemp, writeFile, readFile, readdir, rm } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { readClaudeSession as readSession } from '#/claude-code';
+import * as jsonl from '#/jsonl';
 
 const user = (uuid: string, parentUuid: string | null, content: unknown, extra: Record<string, unknown> = {}) => ({ type: 'user', uuid, parentUuid, sessionId: 'example-session', cwd: '/example/project', message: { role: 'user', content }, ...extra });
 const assistant = (uuid: string, parentUuid: string | null, content: unknown, extra: Record<string, unknown> = {}) => ({ type: 'assistant', uuid, parentUuid, message: { role: 'assistant', model: 'example-model', content }, ...extra });
@@ -288,16 +289,19 @@ test('legacy summary records remain metadata rather than becoming a compact summ
 });
 
 test('a changing source is rejected rather than mixing rows from two reads', async () => {
-  const { appendFile } = await import('node:fs/promises');
   const dir = await mkdtemp(join(tmpdir(), 'session-import-fixture-'));
   const path = join(dir, 'example.jsonl');
-  let timer;
   try {
     await writeFile(path, Array.from({ length: 15000 }, (_, i) => JSON.stringify(user(`u-${i}`, i ? `u-${i - 1}` : null, 'example task'))).join('\n') + '\n');
-    const reading = readSession(path, { imageDirectory: join(dir, 'images') });
-    timer = setInterval(() => { appendFile(path, '\n').catch(() => {}); }, 1);
-    await expect(reading).rejects.toMatchObject({ code: 'SOURCE_CHANGED' });
-  } finally { clearInterval(timer); await rm(dir, { recursive: true, force: true }); }
+    const readOriginal = jsonl.readJsonLines;
+    const spy = vi.spyOn(jsonl, 'readJsonLines').mockImplementationOnce(async function* (sourcePath: string) {
+      yield* readOriginal(sourcePath);
+      await appendFile(path, JSON.stringify(user('u-changed', null, 'changed task')) + '\n');
+    });
+    try {
+      await expect(readSession(path, { imageDirectory: join(dir, 'images') })).rejects.toMatchObject({ code: 'SOURCE_CHANGED' });
+    } finally { spy.mockRestore(); }
+  } finally { await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); }
 });
 
 test('tool result metadata retains file paths and unknown fields while marking exact payload deduplication', async () => {

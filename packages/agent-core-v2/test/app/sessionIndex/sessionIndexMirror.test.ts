@@ -81,8 +81,8 @@ describe('SessionIndexMirror', () => {
     disposeHost = undefined;
     await drainSessionIndexMirror();
     await drainQueryStoreDisposals();
-    await fsp.rm(homeDir, { recursive: true, force: true });
-  });
+    await fsp.rm(homeDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }, 30_000);
 
   async function publishGeneration(): Promise<void> {
     await queryStore.setCheckpoint(SESSION_INDEX_MANIFEST, { seq: GENERATION });
@@ -114,7 +114,7 @@ describe('SessionIndexMirror', () => {
     mirror.record(summary('a', { title: 'first', updatedAt: 1 }));
     mirror.record(summary('a', { title: 'latest', updatedAt: 5 }));
     mirror.record(summary('b', { archived: true, updatedAt: 3 }));
-    expect(mirror.pending().map((s) => s.id).sort()).toEqual(['a', 'b']);
+    expect(mirror.pending().map((s) => s.id).toSorted()).toEqual(['a', 'b']);
 
     await mirror.drain();
     expect(mirror.pending()).toEqual([]);

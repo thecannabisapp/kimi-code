@@ -47,7 +47,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-  await rm(sessionDir, { recursive: true, force: true });
+  await rm(sessionDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 });
 
 describe('Background reconcile — stale ghost detection', () => {

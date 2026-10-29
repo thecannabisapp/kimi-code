@@ -20,6 +20,7 @@ import {
   reduceContextTranscript,
   type ContextMessage,
   type IDisposable,
+  type ISessionScopeHandle,
   type Scope,
   type SessionMeta,
 } from '@moonshot-ai/agent-core-v2';
@@ -70,6 +71,7 @@ export interface TranscriptServiceDeps {
 }
 
 interface LiveEntry {
+  readonly session: ISessionScopeHandle;
   readonly store: TranscriptStore;
   readonly binding: TranscriptBinding;
   readonly ready: Promise<void>;
@@ -114,15 +116,14 @@ export class TranscriptService {
   }
 
   forSessionLive(sessionId: string): TranscriptStore | undefined {
+    const session = getLiveSessionById(this.deps.core.accessor, sessionId);
     const existing = this.live.get(sessionId);
     if (existing !== undefined) {
-      if (getLiveSessionById(this.deps.core.accessor, sessionId) !== undefined) {
+      if (session !== undefined && existing.session === session) {
         return existing.store;
       }
       this.dropSession(sessionId);
-      return undefined;
     }
-    const session = getLiveSessionById(this.deps.core.accessor, sessionId);
     if (session === undefined) return undefined;
     const store = new TranscriptStore(sessionId);
     let binding: TranscriptBinding;
@@ -141,6 +142,7 @@ export class TranscriptService {
       throw error;
     }
     this.live.set(sessionId, {
+      session,
       store,
       binding,
       ready: (async () => {

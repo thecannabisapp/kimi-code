@@ -1,8 +1,11 @@
 import { execFile } from 'node:child_process';
 import { realpath } from 'node:fs/promises';
+import { setTimeout as delay } from 'node:timers/promises';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 
 const GIT_TIMEOUT_MS = 60_000;
+const UPDATE_REF_LOCK_RETRIES = 4;
+const UPDATE_REF_LOCK_BACKOFF_MS = 20;
 
 export class GitError extends Error {
   constructor(
@@ -20,10 +23,18 @@ export interface GitOptions {
   readonly input?: string;
 }
 
-export async function git(
+function isUpdateRefLockCollision(error: unknown): boolean {
+  return (
+    error instanceof GitError &&
+    error.args[0] === 'update-ref' &&
+    error.stderr.includes(".lock': File exists.")
+  );
+}
+
+async function execGit(
   cwd: string,
   args: readonly string[],
-  options: GitOptions = {},
+  options: GitOptions,
 ): Promise<string> {
   return new Promise((resolve, reject) => {
     const child = execFile(
@@ -51,6 +62,21 @@ export async function git(
     );
     if (options.input !== undefined) child.stdin?.end(options.input);
   });
+}
+
+export async function git(
+  cwd: string,
+  args: readonly string[],
+  options: GitOptions = {},
+): Promise<string> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await execGit(cwd, args, options);
+    } catch (error) {
+      if (attempt >= UPDATE_REF_LOCK_RETRIES || !isUpdateRefLockCollision(error)) throw error;
+      await delay(UPDATE_REF_LOCK_BACKOFF_MS * 2 ** attempt);
+    }
+  }
 }
 
 export async function tryGit(cwd: string, args: readonly string[]): Promise<string | null> {

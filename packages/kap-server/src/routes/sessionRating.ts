@@ -49,6 +49,9 @@ export function registerSessionRatingRoutes(
       const request = req.body;
       if (request.op === 'evaluate') {
         const store = transcripts.forSessionLive(session_id);
+        if (store !== undefined) {
+          await transcripts.whenReady(session_id);
+        }
         const items = store === undefined
           ? (await transcripts.readColdSnapshot(session_id))?.items
           : store.getAgent('main')?.getItems();

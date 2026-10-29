@@ -1151,14 +1151,20 @@ describe('oauth logout remote-control cleanup', () => {
       deactivateDevice: async () => {},
     };
     let logouts = 0;
-    let resolveFirst!: () => void;
+    let signalEntered!: () => void;
+    let releaseFirst!: () => void;
+    const firstEntered = new Promise<void>((resolve) => {
+      signalEntered = resolve;
+    });
+    const holdFirst = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
     const post = await logoutHandler(remoteControl, remoteControlDevices, async (provider) => {
       logouts += 1;
       events.push(`logout:${logouts}`);
       if (logouts === 1) {
-        await new Promise<void>((resolve) => {
-          resolveFirst = resolve;
-        });
+        signalEntered();
+        await holdFirst;
       }
       return { logged_out: true, provider: provider ?? 'managed:kimi-code' };
     });
@@ -1169,9 +1175,12 @@ describe('oauth logout remote-control cleanup', () => {
     const second = post({ provider: 'managed:kimi-code' }) as Promise<
       Envelope<{ logged_out: true }>
     >;
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    expect(events).toEqual(['clear', 'logout:1']);
-    resolveFirst();
+    await firstEntered;
+    try {
+      expect(events).toEqual(['clear', 'logout:1']);
+    } finally {
+      releaseFirst();
+    }
     const [firstPayload, secondPayload] = await Promise.all([first, second]);
 
     expect(firstPayload.code).toBe(0);

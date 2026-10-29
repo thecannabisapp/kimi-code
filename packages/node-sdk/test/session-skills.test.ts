@@ -157,9 +157,7 @@ describe('Session skills', () => {
       const ended = waitForSDKEvent(session, (event) => event.type === 'turn.ended');
 
       await session.activateSkill(' review ', ' src/app.ts ');
-      const activatedEvent = await activated;
-      const metaEvent = await metaUpdated;
-      await ended;
+      const [activatedEvent, metaEvent] = await Promise.all([activated, metaUpdated, ended]);
       unsubscribe();
 
       expect(activatedEvent).toMatchObject({

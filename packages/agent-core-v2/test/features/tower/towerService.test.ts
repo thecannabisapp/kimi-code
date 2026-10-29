@@ -666,6 +666,8 @@ describe('AgentTowerService', () => {
       await vi.waitFor(async () => {
         const state = await store.load();
         expect(state.roster.agents[0]?.deathStatus).toBe('failed');
+        const activityLog = await readFile(join(repo, '.tower/comms/log/activity.log'), 'utf8');
+        expect(activityLog).toContain(' died ');
       });
       const state = await store.load();
       expect(state.roster.agents[0]?.diedAt).toBeDefined();
@@ -792,6 +794,8 @@ describe('AgentTowerService', () => {
       await vi.waitFor(async () => {
         const state = await store.load();
         expect(state.roster.agents[0]?.diedAt).toBeUndefined();
+        const log = await readFile(join(repo, '.tower/comms/log/activity.log'), 'utf8');
+        expect(log).toContain('revived');
       });
       const state = await store.load();
       expect(state.roster.agents[0]?.deathStatus).toBeUndefined();

@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { link, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -11,9 +11,17 @@ const encoded = png.toString('base64');
 const digest = createHash('sha256').update(png).digest('hex');
 const embedded = (data = encoded, mime = 'image/png') => ({ type: 'image', source: { type: 'base64', media_type: mime, data } });
 const roots: string[] = [];
+const children: ChildProcess[] = [];
 
 afterEach(async () => {
-  await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+  await Promise.all(children.splice(0).map((child) => new Promise<void>((resolve) => {
+    if (child.exitCode !== null || child.signalCode !== null) resolve();
+    else {
+      child.once('close', () => resolve());
+      child.once('error', () => resolve());
+    }
+  })));
+  await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })));
 });
 
 async function fixture(cwd?: string) {
@@ -262,7 +270,7 @@ test('concurrent identical writes across stores reuse complete image and index f
   expect(new Set(indexes).size).toBe(1);
   expect(await readFile(join(directory, `${digest}.png`))).toEqual(png);
   expect(await readdir(directory)).toHaveLength(2);
-});
+}, 30_000);
 
 test('concurrent processes wait for another writer to finish publishing a complete file', async () => {
   const { directory } = await fixture();
@@ -270,6 +278,7 @@ test('concurrent processes wait for another writer to finish publishing a comple
   const script = `import { writeAttachmentFile } from ${JSON.stringify(moduleUrl)}; await writeAttachmentFile(process.argv[1], 'shared.bin', Buffer.alloc(1024 * 1024, 42));`;
   await Promise.all(Array.from({ length: 16 }, () => new Promise<void>((resolve, reject) => {
     const child = spawn(process.execPath, ['--input-type=module', '-e', script, directory], { stdio: ['ignore', 'ignore', 'pipe'] });
+    children.push(child);
     let errors = '';
     child.stderr.setEncoding('utf8');
     child.stderr.on('data', (chunk: string) => { errors += chunk; });
@@ -278,7 +287,7 @@ test('concurrent processes wait for another writer to finish publishing a comple
   })));
   expect(await readFile(join(directory, 'shared.bin'))).toEqual(Buffer.alloc(1024 * 1024, 42));
   expect(await readdir(directory)).toEqual(['shared.bin']);
-});
+}, 30_000);
 
 test('publishes streamed attachments only after all bytes are written', async () => {
   const { directory } = await fixture();

@@ -391,8 +391,8 @@ describe('FullCompaction', () => {
       expect(profile.data().systemPrompt).toBe(before);
       expect(profile.getActiveToolNames()).toEqual(['Read']);
     } finally {
-      rmSync(homeDir, { recursive: true, force: true });
-      rmSync(workDir, { recursive: true, force: true });
+      rmSync(homeDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+      rmSync(workDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     }
   });
 
@@ -1405,7 +1405,7 @@ describe('FullCompaction', () => {
     );
     vi.useRealTimers();
     await ctx.expectResumeMatches();
-  });
+  }, 60_000);
 
   it('reports compaction retry_count when retryable generation failures are exhausted', async () => {
     vi.useFakeTimers();
@@ -1492,7 +1492,7 @@ describe('FullCompaction', () => {
     });
     vi.useRealTimers();
     await ctx.expectResumeMatches();
-  });
+  }, 60_000);
 
   it('fails a truncated compaction immediately when compactionMaxAttempts is 1', async () => {
     let attempts = 0;

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { promises as fsp } from 'node:fs';
 import os from 'node:os';
@@ -237,7 +237,7 @@ describe('MiniDbQueryStore', () => {
       { kind: 'put', collection: COLLECTION, key: 'b', value: { v: 2 } },
     ]);
     const found = await store.getMany<{ v: number }>(COLLECTION, ['a', 'missing', 'b']);
-    expect([...found.keys()].sort()).toEqual(['a', 'b']);
+    expect([...found.keys()].toSorted()).toEqual(['a', 'b']);
     expect(found.get('a')).toEqual({ v: 1 });
     expect(found.get('b')).toEqual({ v: 2 });
     expect(await store.getMany(COLLECTION, [])).toEqual(new Map());
@@ -286,9 +286,9 @@ describe('MiniDbQueryStore', () => {
   it('pageByColumn stays cheap as the collection grows', async () => {
     const store = build();
     const seed = async (from: number, to: number): Promise<void> => {
-      for (let start = from; start < to; start += 500) {
+      for (let start = from; start < to; start += 5000) {
         const ops = [];
-        for (let i = start; i < Math.min(start + 500, to); i++) {
+        for (let i = start; i < Math.min(start + 5000, to); i++) {
           ops.push({
             kind: 'put' as const,
             collection: COLLECTION,
@@ -300,30 +300,40 @@ describe('MiniDbQueryStore', () => {
         await store.batch(ops);
       }
     };
-    const medianPageMs = async (): Promise<number> => {
-      const runs: number[] = [];
-      for (let r = 0; r < 5; r++) {
-        const t0 = performance.now();
-        const page = await store.pageByColumn(COLLECTION, {
-          column: 'updatedAt',
-          dir: 'desc',
-          limit: 20,
-        });
-        expect(page.items).toHaveLength(20);
-        runs.push(performance.now() - t0);
-      }
-      runs.sort((a, b) => a - b);
-      return runs[(runs.length / 2) | 0]!;
+
+    type IssuedQuery = Parameters<typeof ClusterDb.prototype.query>[0];
+    const issued: (IssuedQuery | undefined)[] = [];
+    const originalQuery = ClusterDb.prototype.query;
+    const spy = vi.spyOn(ClusterDb.prototype, 'query').mockImplementation(function (
+      this: ClusterDb<unknown>,
+      q?: IssuedQuery,
+    ) {
+      issued.push(q);
+      return originalQuery.call(this, q);
+    });
+    const topPage = async (top: number): Promise<readonly { id: string; updatedAt: number }[]> => {
+      issued.length = 0;
+      const page = await store.pageByColumn<{ id: string; updatedAt: number }>(COLLECTION, {
+        column: 'updatedAt',
+        dir: 'desc',
+        limit: 20,
+      });
+      expect(issued).toEqual([{ dt: { updatedAt: {} }, sort: { updatedAt: -1 }, limit: 20 }]);
+      expect(page.items.map((item) => item.updatedAt)).toEqual(
+        Array.from({ length: 20 }, (_, index) => top - index),
+      );
+      return page.items;
     };
 
-    await seed(0, 1_000);
-    const small = await medianPageMs();
-    await seed(1_000, 10_000);
-    const large = await medianPageMs();
-    console.log(
-      `[baseline] queryStore pageByColumn ${JSON.stringify({ rows: [1000, 10000], medianMs: [small, large] })}`,
-    );
-    expect(large).toBeLessThan(small * 10 + 100);
+    try {
+      await seed(0, 1_000);
+      const small = await topPage(999);
+      await seed(1_000, 10_000);
+      const large = await topPage(9_999);
+      expect(large).toHaveLength(small.length);
+    } finally {
+      spy.mockRestore();
+    }
   }, 60_000);
 
   it('listKeys and dropCollection operate on the whole collection', async () => {

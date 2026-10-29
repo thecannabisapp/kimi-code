@@ -4001,11 +4001,16 @@ describe('bindSessionTranscript', () => {
     return home;
   }
 
-  function fakeCoreWithAgents(agents: FakeAgents): Scope {
+  function fakeCoreWithAgents(
+    agents: FakeAgents,
+    getSession?: () => ISessionScopeHandle,
+  ): Scope {
+    const session = fakeSession(agents);
+    const currentSession = getSession ?? (() => session);
     const sessionLifecycle = {
       onDidCloseSession: () => ({ dispose: () => undefined }),
       onDidArchiveSession: () => ({ dispose: () => undefined }),
-      get: (sid: string) => (sid === 's1' ? fakeSession(agents) : undefined),
+      get: (sid: string) => (sid === 's1' ? currentSession() : undefined),
     };
     const handler = {
       id: 'ws',
@@ -4033,6 +4038,36 @@ describe('bindSessionTranscript', () => {
       },
     } as unknown as Scope;
   }
+
+  it('rebinds the live store when a session is reloaded with the same id', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'transcript-reload-'));
+    try {
+      const firstAgents = new FakeAgents();
+      firstAgents.add('main');
+      const secondAgents = new FakeAgents();
+      secondAgents.add('main');
+      let session = fakeSession(firstAgents);
+      const service = new TranscriptService({
+        homeDir: home,
+        core: fakeCoreWithAgents(firstAgents, () => session),
+      });
+      const first = service.forSessionLive('s1');
+      await service.whenReady('s1');
+
+      session = fakeSession(secondAgents);
+      const second = service.forSessionLive('s1');
+      expect(second).not.toBe(first);
+      expect(service.forSessionLive('s1')).toBe(second);
+      await service.whenReady('s1');
+      secondAgents.byId('main')!.bus.emit(
+        ev({ type: 'turn.started', turnId: 0, origin: { kind: 'user' }, prompt: 'reloaded' }),
+      );
+      expect(second?.getAgent('main')?.getTurn('t0')).toMatchObject({ prompt: 'reloaded' });
+      service.dropSession('s1');
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
 
   it('stops projecting for an agent once it is disposed', () => {
     const agents = new FakeAgents();

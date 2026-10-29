@@ -7,6 +7,7 @@ import { Jimp } from 'jimp';
 
 import type { ToolCall } from '#human/llm/message';
 import type { ToolInputDisplay } from '#/tool/toolInputDisplay';
+import { setWatchEnabled } from '#/human/utils/watch';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { SyncDescriptor } from '#/_base/di/descriptors';
@@ -73,6 +74,8 @@ import { stubBootstrap } from '../../app/bootstrap/stubs';
 import { recordingTelemetry, type TelemetryRecord } from '../../app/telemetry/stubs';
 import { registerStateServices } from '../../state/stubs';
 import { registerTestAgentWireServices } from '../../wire/stubs';
+
+setWatchEnabled(false);
 
 type ToolExecutorEvent =
   | { readonly type: 'tool.result'; readonly toolCallId: string; readonly result: ToolResult };
@@ -1092,6 +1095,7 @@ describe('truncation pipeline', () => {
     truncationContainer.set(IConfigService, new SyncDescriptor(ConfigService));
     readConfig = truncationContainer.get(IConfigService);
     await readConfig.ready;
+    setWatchEnabled(false);
     globProcess = new HostProcessService();
     const runtime = Object.assign(new FakeRuntime(
       { workspaceId: 'workspace', runtimeId: 'local', generation: 'test' },
@@ -1122,7 +1126,7 @@ describe('truncation pipeline', () => {
   });
 
   afterEach(async () => {
-    await rm(homeDir, { recursive: true, force: true });
+    await rm(homeDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });
 
   it('spills oversized output to disk and renders a pointer for the model', async () => {
@@ -1308,7 +1312,7 @@ describe('truncation pipeline', () => {
     const paths = [...recovered.matchAll(/Original attachment saved at: ("[^\n]+")/g)].map((match) => JSON.parse(match[1]!) as string);
     expect(paths).toHaveLength(150);
     for (const [i, path] of paths.entries()) expect(readFileSync(path).equals(originals[i]!)).toBe(true);
-  });
+  }, 60_000);
 
   it('resolves attachment references for media reads and exposes binary paths for converters', async () => {
     const runtimeFs = mediaRuntime.inspect().fs!;
