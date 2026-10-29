@@ -135,6 +135,7 @@ import { readTowerStatusSummary } from '@moonshot-ai/agent-core-v2/features/towe
 import { loadMcpServers } from '@moonshot-ai/agent-core-v2/app/mcpConfig/configLoader';
 import { fsSuggestRequestSchema } from '@moonshot-ai/agent-core-v2/workspace/workspaceFs/fs';
 import { IAppendLogStore } from '@moonshot-ai/agent-core-v2/persistence/interface/appendLogStore';
+import { ISessionLockService } from '@moonshot-ai/agent-core-v2/persistence/interface/sessionLock';
 import {
   bootstrap,
   DEFAULT_AGENT_PROFILE_NAME,
@@ -143,7 +144,10 @@ import {
   drainSessionIndexMirror,
   ensureKimiHome,
   ensureMainAgent,
+  getOrRestoreAgent,
+  reloadOnStale,
   agentContextOf,
+  IAgentChangeNotifierService,
   IAgentContextMemoryService,
   IAgentConversationUndoService,
   IAgentCronService,
@@ -184,6 +188,7 @@ import {
   ISessionManager,
   ISessionMcpHandle,
   ISessionMetadata,
+  ISessionAgentProfileCatalog,
   ISessionSkillCatalog,
   IAgentTodoService,
   ISessionWorkspaceContext,
@@ -210,6 +215,7 @@ import {
   ErrorCodes as V2ErrorCodes,
   resolveAgentTaskConfig,
   resolveConfigPath,
+  resolveSubagentModelPool,
   resolveKimiHome,
   resolveLoggingConfig,
   resolvePrintBackgroundMode,
@@ -222,6 +228,7 @@ import {
   type Scope,
   type ServicesAccessor,
   type SessionSummary as V2SessionSummary,
+  type SubagentModelPoolSnapshot,
 } from '@moonshot-ai/agent-core-v2';
 import {
   RPCError,
@@ -229,6 +236,8 @@ import {
   type Klient,
   type ImportCustomRegistryOptions,
   type ImportCustomRegistryResult,
+  type RefreshProviderModelsOptions,
+  type RefreshProviderModelsResponse,
 } from '@moonshot-ai/klient';
 import { RegistryImportError } from '#/catalog';
 import { createKlient } from '@moonshot-ai/klient/memory';
@@ -246,6 +255,7 @@ import {
   SDKRpcClientBase,
   type ActivatePluginCommandRpcInput,
   type ActivateSkillRpcInput,
+  type ConfigSectionChange,
   type ImportContextRpcInput,
   type ReconnectMcpServerRpcInput,
   type ReloadSessionRpcInput,
@@ -316,6 +326,7 @@ import type {
   SuggestFilesInput,
   SuggestFilesResult,
   TelemetryClient,
+  Unsubscribe,
   UploadFileOptions,
   WorkspaceTrustInfo,
   WorkspaceTrustInstructionSources,
@@ -635,12 +646,16 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
    * anyway.
    */
   override async listWorkspaceSkills(workDir: string): Promise<readonly SkillSummary[]> {
-    const handler = await this.engineAccessor
+    const lease = await this.engineAccessor
       .get(IWorkspaceInstanceManager)
-      .getOrCreate({ root: normalizeRequiredWorkDir('listWorkspaceSkills', workDir) });
-    const catalog = handler.program.skills;
-    await catalog.ready;
-    return catalog.catalog.listSkills().map(summarizeSkill);
+      .acquire({ root: normalizeRequiredWorkDir('listWorkspaceSkills', workDir) });
+    try {
+      const catalog = lease.instance.program.skills;
+      await catalog.ready;
+      return catalog.catalog.listSkills().map(summarizeSkill);
+    } finally {
+      lease.dispose();
+    }
   }
 
   /**
@@ -664,19 +679,23 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
         `suggestFiles ${where}${issue?.message ?? 'invalid input'}`,
       );
     }
-    const handler = await this.engineAccessor
+    const lease = await this.engineAccessor
       .get(IWorkspaceInstanceManager)
-      .getOrCreate({ root: normalizeRequiredWorkDir('suggestFiles', workDir) });
-    const result = await handler.program.fs.suggest(parsed.data);
-    return {
-      items: result.items.map((item) => ({
-        path: item.path,
-        name: item.name,
-        kind: item.kind,
-        matchPositions: item.match_positions,
-      })),
-      truncated: result.truncated,
-    };
+      .acquire({ root: normalizeRequiredWorkDir('suggestFiles', workDir) });
+    try {
+      const result = await lease.instance.program.fs.suggest(parsed.data);
+      return {
+        items: result.items.map((item) => ({
+          path: item.path,
+          name: item.name,
+          kind: item.kind,
+          matchPositions: item.match_positions,
+        })),
+        truncated: result.truncated,
+      };
+    } finally {
+      lease.dispose();
+    }
   }
 
   /**
@@ -686,29 +705,33 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
    * computed inside the engine by `WorkspaceTrustDisclosureService`.
    */
   override async getWorkspaceTrustInfo(workDir: string): Promise<WorkspaceTrustInfo> {
-    const handler = await this.engineAccessor
+    const lease = await this.engineAccessor
       .get(IWorkspaceInstanceManager)
-      .getOrCreate({ root: workDir });
-    const trusted = await handler.program.trust.get();
-    if (trusted) {
+      .acquire({ root: workDir });
+    try {
+      const trusted = await lease.instance.program.trust.get();
+      if (trusted) {
+        return {
+          trusted: true,
+          gatedMcpServers: [],
+          gatedAdditionalDirs: [],
+          additionalDirSources: [],
+          warnings: [],
+          instructionSources: EMPTY_INSTRUCTION_SOURCES,
+        };
+      }
+      const activation = await lease.instance.program.trustDisclosure.describeGatedActivation();
       return {
-        trusted: true,
-        gatedMcpServers: [],
-        gatedAdditionalDirs: [],
-        additionalDirSources: [],
-        warnings: [],
-        instructionSources: EMPTY_INSTRUCTION_SOURCES,
+        trusted: false,
+        gatedMcpServers: activation.mcpServers,
+        gatedAdditionalDirs: activation.additionalDirs,
+        additionalDirSources: activation.additionalDirSources,
+        warnings: activation.warnings,
+        instructionSources: activation.instructionSources,
       };
+    } finally {
+      lease.dispose();
     }
-    const activation = await handler.program.trustDisclosure.describeGatedActivation();
-    return {
-      trusted: false,
-      gatedMcpServers: activation.mcpServers,
-      gatedAdditionalDirs: activation.additionalDirs,
-      additionalDirSources: activation.additionalDirSources,
-      warnings: activation.warnings,
-      instructionSources: activation.instructionSources,
-    };
   }
 
   /**
@@ -718,10 +741,14 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
    * servers connect live, no restart needed.
    */
   override async trustWorkspace(workDir: string): Promise<void> {
-    const handler = await this.engineAccessor
+    const lease = await this.engineAccessor
       .get(IWorkspaceInstanceManager)
-      .getOrCreate({ root: workDir });
-    await handler.program.trust.trust();
+      .acquire({ root: workDir });
+    try {
+      await lease.instance.program.trust.trust();
+    } finally {
+      lease.dispose();
+    }
   }
 
   /**
@@ -742,6 +769,15 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
   override async getConfigDiagnostics(): Promise<ConfigDiagnostics> {
     await this.configReady;
     return diagnosticsToConfigDiagnostics(await this.klient.global.config.diagnostics());
+  }
+
+  override onConfigSectionChanged(
+    listener: (change: ConfigSectionChange) => void,
+  ): Unsubscribe {
+    const subscription = this.klient.events.on('config.sectionChanged', listener);
+    return () => {
+      subscription.dispose();
+    };
   }
 
   /**
@@ -802,10 +838,6 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
     return this.getConfig();
   }
 
-  override supportsAtomicSectionReplace(): boolean {
-    return true;
-  }
-
   override async importCustomRegistry(
     options: ImportCustomRegistryOptions,
   ): Promise<ImportCustomRegistryResult> {
@@ -824,9 +856,11 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
     }
   }
 
-  override async replaceConfigSections(sections: Record<string, unknown>): Promise<void> {
+  override async refreshProviderModels(
+    options?: RefreshProviderModelsOptions,
+  ): Promise<RefreshProviderModelsResponse> {
     await this.configReady;
-    await this.klient.global.config.replaceSections({ sections });
+    return this.klient.global.kosong.refreshProviders(options);
   }
 
   override async listPlugins(): Promise<readonly PluginSummary[]> {
@@ -988,6 +1022,30 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
       return await action();
     } finally {
       await closeSessionById(this.engineAccessor, sessionId);
+    }
+  }
+
+  /**
+   * Runs a call that may start a session run. When another client updated the
+   * session (`session.stale`), the engine reloads it from disk, this client
+   * re-wires it and lets the host refresh through the stale-reload handler,
+   * then the call is retried once (or rejected again when `retry` is false).
+   */
+  private async withStaleReload<T>(
+    sessionId: string,
+    run: () => Promise<T>,
+    retry = true,
+  ): Promise<T> {
+    try {
+      return await reloadOnStale(this.engineAccessor, sessionId, run, {
+        retry,
+        onReloaded: async (handle) => {
+          this.wireSession(handle);
+          await this.notifyStaleReload(sessionId, await this.resumedSessionSummary(handle));
+        },
+      });
+    } catch (error) {
+      throw restateEngineError(error);
     }
   }
 
@@ -1437,19 +1495,23 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
       input.forkId === undefined ? [input.id] : [input.id, input.forkId],
       async () => {
         try {
-          const program = await programForSession(this.engineAccessor, input.id);
-          if (program === undefined) throw SDKRpcClientV2.sessionNotFound(input.id);
-          const meta = await this.engineAccessor.get(ISessionManager).fork({
-            sourceSessionId: input.id,
-            newSessionId: input.forkId,
-            title: input.title,
-            metadata: input.metadata,
-            turnIndex: input.turnIndex,
-          });
-          const handle = await resumeSessionById(this.engineAccessor, meta.id);
-          if (handle === undefined) throw SDKRpcClientV2.sessionNotFound(meta.id);
-          this.wireSession(handle);
-          return await this.resumedSessionSummary(handle);
+          const lease = await programForSession(this.engineAccessor, input.id);
+          if (lease === undefined) throw SDKRpcClientV2.sessionNotFound(input.id);
+          try {
+            const meta = await this.engineAccessor.get(ISessionManager).fork({
+              sourceSessionId: input.id,
+              newSessionId: input.forkId,
+              title: input.title,
+              metadata: input.metadata,
+              turnIndex: input.turnIndex,
+            });
+            const handle = await resumeSessionById(this.engineAccessor, meta.id);
+            if (handle === undefined) throw SDKRpcClientV2.sessionNotFound(meta.id);
+            this.wireSession(handle);
+            return await this.resumedSessionSummary(handle);
+          } finally {
+            lease.dispose();
+          }
         } catch (error) {
           throw restateEngineError(error);
         }
@@ -1579,6 +1641,8 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
     const sessionId = input.sessionId;
     return this.runSessionAccess(sessionId, async () => {
       const live = this.liveSession(sessionId);
+      const indexEntry =
+        live === undefined ? await this.engineAccessor.get(ISessionIndex).get(sessionId) : undefined;
       if (live !== undefined) {
         const agentLifecycle = live.accessor.get(IAgentLifecycleService);
         for (const agent of agentLifecycle.list()) {
@@ -1591,14 +1655,55 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
               { details: { sessionId } },
             );
           }
+          if (agentHandle.accessor.get(IAgentFullCompactionService).compacting !== null) {
+            throw new KimiError(
+              ErrorCodes.TURN_AGENT_BUSY,
+              `Session "${sessionId}" cannot be reloaded while compaction is running`,
+              { details: { sessionId } },
+            );
+          }
         }
-      } else if ((await this.engineAccessor.get(ISessionIndex).get(sessionId)) === undefined) {
+      } else if (indexEntry === undefined) {
         throw SDKRpcClientV2.sessionNotFound(sessionId);
       }
+      const workspaceId =
+        live?.accessor.get(ISessionContext).workspaceId ?? indexEntry?.workspaceId;
+      let previousSubagentNames: readonly string[] | undefined;
+      let previousModelPool: SubagentModelPoolSnapshot | null | undefined;
+      let staleNotifier: IAgentChangeNotifierService | undefined;
+      if (live !== undefined) {
+        const main = live.accessor.get(IAgentLifecycleService).handleOf(MAIN_AGENT_ID);
+        if (main !== undefined) {
+          previousSubagentNames = main.accessor
+            .get(ISessionAgentProfileCatalog)
+            .list()
+            .map((profile) => profile.name);
+          const pool = resolveSubagentModelPool(main.accessor.get(IConfigService));
+          previousModelPool =
+            pool === undefined
+              ? null
+              : { defaultModel: pool.defaultModel, models: { ...pool.models } };
+          staleNotifier = main.accessor.get(IAgentChangeNotifierService);
+          staleNotifier.mute();
+        }
+      }
       await this.configReady;
-      await this.klient.global.config.reload();
-      await this.klient.global.plugins.reload();
-      await this.refreshPluginSessionStarts(sessionId);
+      try {
+        await this.klient.global.config.reload();
+        await this.klient.global.plugins.reload();
+        await this.reloadWorkspaceCatalogs(workspaceId);
+        await this.refreshPluginSessionStarts(sessionId);
+      } catch (error) {
+        if (staleNotifier !== undefined) {
+          staleNotifier.unmute();
+          await Promise.all([
+            staleNotifier.notifyAgentsMdChanges(),
+            staleNotifier.notifySkillChanges(),
+            staleNotifier.notifySubagentChanges({}),
+          ]).catch(() => undefined);
+        }
+        throw error;
+      }
       if (live !== undefined) {
         await closeSessionById(this.engineAccessor, sessionId);
       }
@@ -1606,16 +1711,31 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
       if (handle === undefined) throw SDKRpcClientV2.sessionNotFound(sessionId);
       const main = handle.accessor.get(IAgentLifecycleService).handleOf(MAIN_AGENT_ID);
       await main?.accessor.get(IAgentPluginService).refreshSessionStart();
+      if (main !== undefined) {
+        const notifier = main.accessor.get(IAgentChangeNotifierService);
+        await notifier.notifyAgentsMdChanges();
+        await notifier.notifySkillChanges();
+        await notifier.notifySubagentChanges({ previousSubagentNames, previousModelPool });
+      }
       this.wireSession(handle);
       return this.resumedSessionSummary(handle);
     });
+  }
+
+  private async reloadWorkspaceCatalogs(workspaceId: string | undefined): Promise<void> {
+    if (workspaceId === undefined) return;
+    const target = this.engineAccessor.get(IWorkspaceInstanceManager).get(workspaceId);
+    if (target === undefined) return;
+    await target.program.instructions.reload();
+    await target.program.skills.reload();
+    await target.program.agentProfiles.reload().catch(() => undefined);
+    await target.program.userAgentProfiles.reload().catch(() => undefined);
   }
 
   private async refreshPluginSessionStarts(excludedSessionId?: string): Promise<void> {
     const workspaces = this.engineAccessor.get(IWorkspaceInstanceManager);
     await Promise.all(
       workspaces.list().map(async (handler) => {
-        await handler.program.skills.reload();
         const sessions = this.engineAccessor
           .get(ISessionManager)
           .list()
@@ -1654,17 +1774,21 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
    * project-local `.kimi-code/local.toml`, `persist: false` joins the
    * handler's shared in-memory set. The set is shared by every session of
    * the workspace (a v1 `persist: false` dir was session-scoped and written
-   * into session metadata to survive a resume; the v2 handler keeps it for
-   * every session of the workspace until the process exits). Returns the
-   * same `{additionalDirs, projectRoot, configPath, persisted}` shape as v1.
+   * into session metadata to survive a resume; the v2 handler keeps it until
+   * the last workspace reference is released). Returns the same
+   * `{additionalDirs, projectRoot, configPath, persisted}` shape as v1.
    */
   override async addAdditionalDir(input: AddAdditionalDirInput): Promise<AddAdditionalDirResult> {
     const handle = this.requireLiveSession(input.id);
     const workspaceId = handle.accessor.get(ISessionContext).workspaceId;
-    const workspace = await this.engineAccessor
+    const lease = await this.engineAccessor
       .get(IWorkspaceInstanceManager)
-      .getOrCreate({ workspaceId });
-    return workspace.program.dirs.addDir({ path: input.path, persist: input.persist });
+      .acquire({ workspaceId });
+    try {
+      return await lease.instance.program.dirs.addDir({ path: input.path, persist: input.persist });
+    } finally {
+      lease.dispose();
+    }
   }
 
   /**
@@ -1719,8 +1843,10 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
   // reached through the live session handle. Every override requires a live
   // session (v1's `requireSession`) and resolves the target agent from
   // `interactiveAgentId`: the main agent materializes on first use with the
-  // default profile bound (v1's eager equivalent); any other agent must
-  // already exist (v1's `AGENT_NOT_FOUND`).
+  // default profile bound (v1's eager equivalent); any other agent is lazily
+  // rebuilt from its persisted session metadata when the live scope is gone
+  // (session reload), falling back to v1's `AGENT_NOT_FOUND` only when the
+  // agent was never registered.
   // -----------------------------------------------------------------------
 
   /**
@@ -1769,7 +1895,7 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
     const session = this.requireLiveSession(sessionId);
     const agentId = this.interactiveAgentId;
     if (agentId === MAIN_AGENT_ID) return this.materializeMainAgent(session);
-    const agent = session.accessor.get(IAgentLifecycleService).handleOf(agentId);
+    const agent = await getOrRestoreAgent(session, agentId);
     if (agent === undefined) {
       throw new KimiError(ErrorCodes.AGENT_NOT_FOUND, `Agent "${agentId}" was not found`);
     }
@@ -1934,10 +2060,12 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
    * `compaction.unable` on an empty history or an active turn.
    */
   override async compact(input: SessionIdRpcInput & CompactOptions): Promise<void> {
-    const agent = await this.agentScope(input.sessionId);
-    agent.accessor.get(IAgentFullCompactionService).begin({
-      source: 'manual',
-      instruction: input.instruction,
+    await this.withStaleReload(input.sessionId, async () => {
+      const agent = await this.agentScope(input.sessionId);
+      agent.accessor.get(IAgentFullCompactionService).begin({
+        source: 'manual',
+        instruction: input.instruction,
+      });
     });
   }
 
@@ -1969,8 +2097,18 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
   }
 
   override async undoHistory(input: SessionIdRpcInput & { count: number }): Promise<void> {
-    const agent = await this.agentScope(input.sessionId);
-    await agent.accessor.get(IAgentConversationUndoService).undo(input.count);
+    await this.withStaleReload(
+      input.sessionId,
+      async () => {
+        const agent = await this.agentScope(input.sessionId);
+        await agent.accessor.get(IAgentConversationUndoService).undo(input.count);
+      },
+      false,
+    );
+  }
+
+  override async takeOverSessionLock(input: SessionIdRpcInput): Promise<void> {
+    this.engineAccessor.get(ISessionLockService).takeover(input.sessionId);
   }
 
   /**
@@ -2030,10 +2168,12 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
    * where v2 queues it FIFO.
    */
   override async prompt(input: SessionPromptRpcInput): Promise<void> {
-    const agent = await this.agentFacade(input.sessionId);
-    await agent.prompt({
-      input: input.input,
-      promptId: input.promptId,
+    await this.withStaleReload(input.sessionId, async () => {
+      const agent = await this.agentFacade(input.sessionId);
+      await agent.prompt({
+        input: input.input,
+        promptId: input.promptId,
+      });
     });
   }
 
@@ -2044,11 +2184,13 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
    * anchor. v2-only: the base class rejects this method on the v1 engine.
    */
   override async promptWithSkills(input: SessionPromptWithSkillsRpcInput): Promise<void> {
-    const agent = await this.agentFacade(input.sessionId);
-    await agent.promptWithSkills({
-      input: input.input,
-      skills: input.skills,
-      steerIfActive: input.steerIfActive,
+    await this.withStaleReload(input.sessionId, async () => {
+      const agent = await this.agentFacade(input.sessionId);
+      await agent.promptWithSkills({
+        input: input.input,
+        skills: input.skills,
+        steerIfActive: input.steerIfActive,
+      });
     });
   }
 
@@ -2059,8 +2201,10 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
    * title/lastPrompt are updated like a prompt's.
    */
   override async steer(input: SessionPromptRpcInput): Promise<void> {
-    const agent = await this.agentFacade(input.sessionId);
-    await agent.steer({ input: input.input });
+    await this.withStaleReload(input.sessionId, async () => {
+      const agent = await this.agentFacade(input.sessionId);
+      await agent.steer({ input: input.input });
+    });
   }
 
   /**
@@ -2118,11 +2262,13 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
    * v1 drops the activation while a turn runs where v2 queues it.
    */
   override async activatePluginCommand(input: ActivatePluginCommandRpcInput): Promise<void> {
-    const agent = await this.agentScope(input.sessionId);
-    await agent.accessor.get(IAgentPluginCommandService).activate({
-      pluginId: input.pluginId,
-      commandName: input.commandName,
-      args: input.args,
+    await this.withStaleReload(input.sessionId, async () => {
+      const agent = await this.agentScope(input.sessionId);
+      await agent.accessor.get(IAgentPluginCommandService).activate({
+        pluginId: input.pluginId,
+        commandName: input.commandName,
+        args: input.args,
+      });
     });
   }
 
@@ -2709,12 +2855,16 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
    * Same `McpServerEntry`-as-`McpServerInfo` cast as listMcpServers.
    */
   override async listWorkspaceMcpServers(workDir: string): Promise<readonly McpServerInfo[]> {
-    const handler = await this.engineAccessor
+    const lease = await this.engineAccessor
       .get(IWorkspaceInstanceManager)
-      .getOrCreate({ root: normalizeRequiredWorkDir('listWorkspaceMcpServers', workDir) });
-    const mcp = handler.program.mcp;
-    await mcp.ready;
-    return mcp.connectionManager().list() as readonly McpServerInfo[];
+      .acquire({ root: normalizeRequiredWorkDir('listWorkspaceMcpServers', workDir) });
+    try {
+      const mcp = lease.instance.program.mcp;
+      await mcp.ready;
+      return mcp.connectionManager().list() as readonly McpServerInfo[];
+    } finally {
+      lease.dispose();
+    }
   }
 
   override async getMcpStartupMetrics(input: SessionIdRpcInput): Promise<McpStartupMetrics> {
@@ -2831,7 +2981,7 @@ function normalizeRequiredWorkDir(operation: string, workDir: string): string {
 
 /**
  * Restate an engine `Error2` in the SDK's public error shape (`KimiError`,
- * what `isKimiError` branches on) so the delegated management plane throws
+ * what `isKimiError` branches on) so the engine-backed entry points throw
  * the same class the v1 client throws for the same failure. Non-Error2
  * failures (DI resolution bugs, aborts) pass through untouched.
  *

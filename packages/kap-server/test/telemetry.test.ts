@@ -7,6 +7,7 @@ import {
   type ITelemetryAppender,
   ITelemetryService,
   IOAuthToolkit,
+  IRegionService,
   logSeed,
   resolveConfigPath,
   resolveLoggingConfig,
@@ -86,7 +87,15 @@ describe('server telemetry', () => {
     };
     const hostTelemetry = new TelemetryService();
     hostTelemetry.addAppender(hostAppender);
-    const app = await bootCore(undefined, undefined, [[ITelemetryService, hostTelemetry]]);
+    const region: IRegionService = {
+      _serviceBrand: undefined,
+      current: () => ({ region: 'mainland-cn', source: 'default' }),
+      getRegionAsync: async () => 'mainland-cn',
+    };
+    const app = await bootCore(undefined, undefined, [
+      [ITelemetryService, hostTelemetry],
+      [IRegionService, region],
+    ]);
     const telemetry = await initializeServerTelemetry(app, home as string);
     const service = app.accessor.get(ITelemetryService);
 

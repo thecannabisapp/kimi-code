@@ -495,7 +495,10 @@ describe('server-v2 /api/v1 plugins', () => {
         if (typeof url === 'string' && url.includes('/releases/latest')) {
           return new Response(null, { status: 404 });
         }
-        if (url === 'https://code.kimi.com/kimi-code/plugins/marketplace.json') {
+        if (
+          typeof url === 'string' &&
+          /^https:\/\/code\.kimi\.(?:com|ai)\/kimi-code\/plugins\/marketplace\.json$/.test(url)
+        ) {
           throw new Error('offline');
         }
         return realFetch(url as never, init);

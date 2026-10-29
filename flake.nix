@@ -72,7 +72,9 @@
         ./packages/node-sdk
         ./packages/oauth
         ./packages/pi-tui
+        ./packages/product
         ./packages/remote-control
+        ./packages/session-import
         ./packages/telemetry
         ./packages/transcript
         ./packages/tree-sitter-bash
@@ -96,7 +98,9 @@
         "@moonshot-ai/kimi-code-oauth"
         "@moonshot-ai/klient"
         "@moonshot-ai/pi-tui"
+        "@moonshot-ai/kimi-code-product"
         "@moonshot-ai/remote-control"
+        "@moonshot-ai/session-import"
         "@moonshot-ai/kimi-telemetry"
         "@moonshot-ai/transcript"
         "@moonshot-ai/tree-sitter-bash"
@@ -156,7 +160,7 @@
               inherit (finalAttrs) pname version src pnpmWorkspaces;
               inherit pnpm;
               fetcherVersion = 3;
-              hash = "sha256-XLjspHl3+xErXYH5fMW8J8fDB5m1ZF8MkATKh11odo0=";
+              hash = "sha256-fvtkW8HSacFek+jT0t7v3WcYsSTfI22+4kDEyEYHFlY=";
             };
 
             nativeBuildInputs = [

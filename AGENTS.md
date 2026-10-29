@@ -24,6 +24,7 @@ This is a TypeScript monorepo built for agent-assisted development. Keep the roo
 - `packages/oauth`: Kimi OAuth and managed auth utilities.
 - `packages/telemetry`: shared client-side telemetry infrastructure.
 - `packages/transcript`: the isomorphic transcript rendering data layer — L1 agent-granular store, L2 idempotent operations, L3 `off/turn/block/delta` subscription granularity, L4 framework-free view registry, plus turn-cursor pagination. Pure TypeScript (browser-safe, no engine imports); the sole owner of the transcript contract types (`src/contract/`) and the op-batch sequencing contract.
+- `packages/session-import`: standalone Node.js conversion of external sessions into a single user message that carries the conversation, full effective-history attachments, and image references. It has no engine or UI dependency; callers provide the destination session attachment directory and context budget.
 - `packages/kap-server`: the Kimi Code server, backed by `@moonshot-ai/agent-core-v2`; exposes sessions over REST + WebSocket (`/api/v1` + `/api/v1/ws`), plus the `/api/v1/debug/*` reflection RPC surface (`--debug-endpoints`, loopback bind + bearer auth).
 - `packages/remote-control`: the Kimi Remote Control tunnel client — registers this machine with the relay and forwards HTTP/WebSocket traffic to the local server, with a machine-wide single-instance lock; consumed by kap-server (the `/api/v1/remote-control` toggle) and by the CLI (`kimi web --remote-control`).
 - `packages/klient`: the client SDK — a contract-driven facade over agent-core-v2 (`global.*` / `session(id).*` / `agent(id).*`, zod-validated); transport via subpath entry (`@moonshot-ai/klient/ipc|memory`, both return the same `Klient`); also hosts the e2e suites. See `packages/klient/AGENTS.md`.
@@ -98,6 +99,14 @@ This is a TypeScript monorepo built for agent-assisted development. Keep the roo
 ## Code Review Rules
 
 These rules apply to every pull request review, automated or human. The user populations and contract files they refer to are listed in `.agents/skills/review-pr/surfaces.md`.
+
+### Review scope: the PR's diff, not the repo
+
+- Review only the PR's diff against its base. A problem in code the PR does not touch (pre-existing on base) is reported as a non-blocking note, never as a blocking finding — the sole exception is pre-existing code that the PR's behavior directly triggers or amplifies.
+- Report a class of issues in one pass: when a finding generalizes to several locations in the diff, list all of them at once instead of raising them across successive rounds.
+- No pure style or personal-preference findings. Every finding carries a severity: P0 blocking / P1 should-fix / P2 suggestion.
+- Re-reviews are incremental: review only what changed since the previous review; do not restate findings on unchanged code or re-raise resolved threads. Before treating a resolved thread as settled, verify the current code: suppress a finding only when the problem is actually fixed or the finding no longer holds.
+- Domain-specific rules keep their own canonical homes — changesets (`.agents/skills/gen-changesets/SKILL.md`), comment-free zones (General Coding Rules), PR text (`write-pr` skill); review against those, not ad-hoc taste.
 
 ### Enumerate changed behavior, not just bugs
 

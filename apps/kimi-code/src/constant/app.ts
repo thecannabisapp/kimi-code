@@ -68,8 +68,8 @@ export const KIMI_CODE_UPDATE_REEXEC_ENV = 'KIMI_CODE_UPDATE_REEXEC';
 export const KIMI_CODE_INPUT_HISTORY_DIR_NAME = 'user-history';
 export const KIMI_CODE_BANNER_DIR_NAME = 'banner';
 export const KIMI_CODE_BANNER_STATE_FILE_NAME = 'state.json';
-export const KIMI_CODE_SURVEY_STATE_FILE_NAME = 'feedback-survey-state.json';
 export const KIMI_CODE_RECOMMENDED_EFFORT_STATE_FILE_NAME = 'recommended-effort-state.json';
+export const KIMI_CODE_MODEL_MIGRATION_STATE_FILE_NAME = 'model-migrations.json';
 
 // Managed Kimi auth provider key shared with OAuth/SDK config.
 export const DEFAULT_OAUTH_PROVIDER_NAME = 'managed:kimi-code';
@@ -108,6 +108,11 @@ export function kimiCodeCdnLatestUrl(): string {
 // bodies, and the CDN install scripts read it for fresh installs.
 export function kimiCodeCdnLatestJsonUrl(): string {
   return `${kimiCodeCdnBase()}/latest.json`;
+}
+// Canary channel pointer, same wire shape as `latest.json`. Only the selected
+// canary channel reads it; stable never requests it.
+export function kimiCodeCdnCanaryChannelUrl(): string {
+  return `${kimiCodeCdnBase()}/channels/canary.json`;
 }
 // Per-release native artifacts: `/binaries/<version>/manifest.json` +
 // `/binaries/<version>/kimi-code-<target>[.exe]` — the bare platform binary

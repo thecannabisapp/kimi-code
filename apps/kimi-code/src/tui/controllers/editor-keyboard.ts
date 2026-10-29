@@ -32,6 +32,7 @@ import type { PendingExit, QueuedMessage } from '../types';
 import type { TUIState } from '../tui-state';
 import type { BtwPanelController } from './btw-panel';
 import type { SurveyController } from './survey-controller';
+import type { ModelMigrationController } from './model-migration';
 
 export interface EditorKeyboardHost {
   state: TUIState;
@@ -47,6 +48,7 @@ export interface EditorKeyboardHost {
   handleUserInput(text: string): void;
   readonly btwPanelController: BtwPanelController;
   readonly surveyController: SurveyController;
+  readonly modelMigration?: ModelMigrationController;
   readonly skillCommandMap: Map<string, string>;
   readonly pluginCommandMap: Map<string, string>;
   steerQueuedMessagesIntoRunningTurn(manual?: boolean): void;
@@ -65,10 +67,9 @@ export interface EditorKeyboardHost {
   updateGoalLengthWarning(text: string | undefined): void;
   updateQueueDisplay(): void;
   toggleToolOutputExpansion(): void;
-  toggleTodoPanelExpansion(): void;
-  /** Returns true when the Updates panel grabbed or released focus. */
-  toggleNotifyPanelFocus(): boolean;
-  handleNotifyPanelKey(key: 'left' | 'right' | 'up' | 'down' | 'escape'): boolean;
+  openTasksBrowser(): void;
+  /** Returns true when the Updates panel took keyboard focus. */
+  focusNotifyPanel(): boolean;
   detachCurrentForegroundTask(): void;
   cancelRunningShellCommand(): void;
   hideSessionPicker(): void;
@@ -116,6 +117,7 @@ export class EditorKeyboardController {
       if (this.pendingExit) this.clearPendingExit();
       host.surveyController.handleEditorChange(text);
       host.updateEditorBorderHighlight(text);
+      if (text.length === 0) host.modelMigration?.retry();
       // Expanding paste markers costs a full-text pass, and only `/goal`
       // input can trip the objective length limit — so skip the expansion
       // for ordinary prompts. Submitted text is trimmed before dispatch, so
@@ -301,24 +303,12 @@ export class EditorKeyboardController {
       host.toggleToolOutputExpansion();
     };
 
-    editor.onToggleTodoExpand = (): boolean => {
-      if (!host.state.todoPanel.hasOverflow()) return false;
-      // Disarm a pending double-press exit confirmation so expanding the
-      // todo list in between two Ctrl-C presses does not accidentally exit.
-      this.clearPendingExit();
-      host.track('shortcut_todo_expand');
-      host.toggleTodoPanelExpansion();
-      return true;
-    };
-
     editor.onPageNotify = (): boolean => {
-      if (!host.toggleNotifyPanelFocus()) return false;
+      if (!host.focusNotifyPanel()) return false;
       this.clearPendingExit();
       host.track('shortcut_notify_page');
       return true;
     };
-
-    editor.onNotifyPanelKey = (key) => host.handleNotifyPanelKey(key);
 
     editor.onCtrlS = () => {
       if (

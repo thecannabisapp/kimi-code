@@ -2205,6 +2205,7 @@ function subagentStub(
       agentId: agent.agentId,
       turn: {} as never,
       completion: Promise.resolve({ summary: 'child summary' }),
+      partialOutput: () => '',
     })),
     planSpawn: vi.fn(async (input: SubagentSpawnPlanInput) => ({
       profileName: input.profileName ?? 'coder',
