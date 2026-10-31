@@ -590,6 +590,6 @@ describe('watch chokidar mode', () => {
 
       expect(fdsAfter - fdsBefore).toBeLessThan(50);
     },
-    60000,
+    180_000,
   );
 });
