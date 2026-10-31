@@ -4,7 +4,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 
 const GIT_TIMEOUT_MS = 60_000;
-const UPDATE_REF_LOCK_RETRIES = 4;
+const UPDATE_REF_LOCK_RETRIES = 8;
 const UPDATE_REF_LOCK_BACKOFF_MS = 20;
 
 export class GitError extends Error {
