@@ -1,5 +1,6 @@
 import type { Session } from '@moonshot-ai/kimi-code-sdk';
 
+import type { TodoItem } from '../components/chrome/todo-panel';
 import { AgentGroupComponent } from '../components/messages/agent-group';
 import { AssistantMessageComponent } from '../components/messages/assistant-message';
 import { CompactionComponent } from '../components/dialogs/compaction';
@@ -743,6 +744,16 @@ export class StreamingUIController {
       state.ui.requestRender();
     }
     this.host.mergeCurrentTurnSteps();
+  }
+
+  setTodoList(todos: readonly TodoItem[]): void {
+    const { state } = this.host;
+    state.todoPanel.setTodos(todos);
+    state.todoPanelContainer.clear();
+    if (!state.todoPanel.isEmpty()) {
+      state.todoPanelContainer.addChild(state.todoPanel);
+    }
+    state.ui.requestRender();
   }
 
   beginCompaction(instruction?: string): void {

@@ -661,6 +661,16 @@ describe('CustomEditor shortcut telemetry hooks', () => {
     expect(onUndo).toHaveBeenCalledOnce();
   });
 
+  it('invokes onToggleTodoExpand on Ctrl+T', () => {
+    const editor = makeEditor();
+    const onToggleTodoExpand = vi.fn().mockReturnValue(true);
+    editor.onToggleTodoExpand = onToggleTodoExpand;
+
+    editor.handleInput('\u0014');
+
+    expect(onToggleTodoExpand).toHaveBeenCalledOnce();
+  });
+
   it.each(['\u000E', '\u001B[110;5u'] as const)(
     'toggles Updates focus on %j without changing the draft',
     (key) => {

@@ -138,6 +138,8 @@ export class CustomEditor extends Editor {
   public onCtrlS?: () => void;
   /** Return `true` to consume Ctrl+B; return `false`/`undefined` to fall through to the editor default (cursor-left). */
   public onCtrlB?: () => boolean;
+  /** Return `true` to consume Ctrl+T when the todo list has overflow to toggle. */
+  public onToggleTodoExpand?: () => boolean;
   /** Return true to consume Ctrl+N (the Updates panel took keyboard focus); otherwise use the editor bindings. */
   public onPageNotify?: () => boolean;
   public onUndo?: () => void;
@@ -498,6 +500,10 @@ export class CustomEditor extends Editor {
       // otherwise fall through so readline's backward-char still works at the
       // idle prompt.
       if (this.onCtrlB?.() === true) return;
+    }
+
+    if (matchesKey(normalized, Key.ctrl('t'))) {
+      if (this.onToggleTodoExpand?.() === true) return;
     }
 
     if (matchesKey(normalized, Key.ctrl('n'))) {

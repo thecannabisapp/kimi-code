@@ -49,6 +49,7 @@ import {
   argsRecord,
   formatErrorPayload,
   formatErrorMessage,
+  isTodoItemShape,
   serializeToolResultOutput,
   stringValue,
 } from '../utils/event-payload';
@@ -414,6 +415,10 @@ export class SessionEventHandler {
     if (event.reason === 'blocked') {
       this.host.showStatus('Turn stopped: prompt hook blocked the request.', 'error');
     }
+    const todos = this.host.state.todoPanel.getTodos();
+    if (todos.length > 0 && todos.every((todo) => todo.status === 'done')) {
+      this.host.streamingUI.setTodoList([]);
+    }
     this.host.streamingUI.resetToolUi();
     this.host.streamingUI.finalizeTurn(sendQueued);
     this.host.recordSessionActivity();
@@ -724,6 +729,17 @@ export class SessionEventHandler {
       synthetic: event.synthetic,
     };
     const matchedCall = streamingUI.completeToolResult(event.toolCallId, resultData);
+    if (matchedCall !== undefined && matchedCall.name === 'TodoList' && !event.isError) {
+      const rawTodos = (matchedCall.args as { todos?: unknown }).todos;
+      if (Array.isArray(rawTodos)) {
+        const sanitized = rawTodos
+          .filter((todo): todo is { title: string; status: 'pending' | 'in_progress' | 'done' } =>
+            isTodoItemShape(todo),
+          )
+          .map((todo) => ({ title: todo.title, status: todo.status }));
+        streamingUI.setTodoList(sanitized);
+      }
+    }
     if (matchedCall !== undefined && isPluginMcpToolName(matchedCall.name)) {
       // Buffer plugin MCP usage for the turn; the update notice fires once the
       // whole turn's output has ended (see handleTurnEnd).

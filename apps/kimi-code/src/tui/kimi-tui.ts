@@ -1257,6 +1257,7 @@ export class KimiTUI {
     ui.clear();
     ui.addChild(this.state.transcriptContainer);
     ui.addChild(this.state.activityContainer);
+    ui.addChild(this.state.todoPanelContainer);
     ui.addChild(this.state.notifyPanelContainer);
     ui.addChild(this.state.queueContainer);
     ui.addChild(this.state.btwPanelContainer);
@@ -1279,6 +1280,7 @@ export class KimiTUI {
     const main = new TuiMainScreen(ui.terminal);
     main.addChild(this.state.transcriptContainer);
     main.addChild(this.state.activityContainer);
+    main.addChild(this.state.todoPanelContainer);
     main.addChild(this.state.notifyPanelContainer);
     main.addChild(this.state.queueContainer);
     main.addChild(this.state.btwPanelContainer);
@@ -3138,6 +3140,7 @@ export class KimiTUI {
     this.tasksBrowserController.close();
     this.btwPanelController.clear();
     this.state.footer.setBackgroundCounts({ bashTasks: 0, agentTasks: 0 });
+    this.streamingUI.setTodoList([]);
     this.sessionEventHandler.notifications.clear();
     this.streamingUI.setTurnId(undefined);
     this.setAppState({ mcpServersSummary: null });
@@ -3544,6 +3547,8 @@ export class KimiTUI {
     this.state.transcriptContainer.clear();
     this.btwPanelController.clear();
     this.clearTerminalInlineImages();
+    this.state.todoPanel.clear();
+    this.state.todoPanelContainer.clear();
     this.sessionEventHandler.notifications.clear();
     this.renderWelcome();
     // No forced full render on session reset: let the differential renderer
@@ -4160,6 +4165,11 @@ export class KimiTUI {
     // Differential render only — no destructive full redraw on expand/collapse.
     // (When the expanded region reaches above the viewport, the engine's own
     // fallback may still do a full render; that path is not forced from here.)
+    this.state.ui.requestRender();
+  }
+
+  toggleTodoPanelExpansion(): void {
+    this.state.todoPanel.toggleExpanded();
     this.state.ui.requestRender();
   }
 

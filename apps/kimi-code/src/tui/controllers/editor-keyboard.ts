@@ -67,6 +67,7 @@ export interface EditorKeyboardHost {
   updateGoalLengthWarning(text: string | undefined): void;
   updateQueueDisplay(): void;
   toggleToolOutputExpansion(): void;
+  toggleTodoPanelExpansion(): void;
   openTasksBrowser(): void;
   /** Returns true when the Updates panel took keyboard focus. */
   focusNotifyPanel(): boolean;
@@ -301,6 +302,14 @@ export class EditorKeyboardController {
     editor.onToggleToolExpand = () => {
       host.track('shortcut_expand');
       host.toggleToolOutputExpansion();
+    };
+
+    editor.onToggleTodoExpand = (): boolean => {
+      if (!host.state.todoPanel.hasOverflow()) return false;
+      this.clearPendingExit();
+      host.track('shortcut_todo_expand');
+      host.toggleTodoPanelExpansion();
+      return true;
     };
 
     editor.onPageNotify = (): boolean => {

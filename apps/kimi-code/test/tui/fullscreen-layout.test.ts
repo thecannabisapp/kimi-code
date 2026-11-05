@@ -151,6 +151,31 @@ function pillLines(state: ReturnType<typeof createTUIState>): string[] {
 }
 
 describe('fullscreen layout', () => {
+  it('keeps the current Todo list docked above the input', async () => {
+    const { state, vt } = await mountFullscreen(24);
+    state.transcriptContainer.addChild(
+      new Text(Array.from({ length: 40 }, (_, i) => `transcript ${String(i + 1)}`).join('\n'), 0, 0),
+    );
+    state.todoPanel.setTodos([
+      { title: 'Finished work', status: 'done' },
+      { title: 'Current work', status: 'in_progress' },
+      { title: 'Remaining work', status: 'pending' },
+    ]);
+    state.todoPanelContainer.addChild(state.todoPanel);
+    state.ui.requestRender();
+    await vt.waitForRender();
+
+    const rows = screenRows(vt);
+    const header = rows.findIndex((row) => row.includes('Todo'));
+    expect(header).toBeGreaterThan(0);
+    expect(rows[header + 1]).toContain('✓ Finished work');
+    expect(rows[header + 2]).toContain('● Current work');
+    expect(rows[header + 3]).toContain('○ Remaining work');
+    expect(rows.slice(header + 4).join('\n')).toContain('test-model');
+
+    state.ui.stop();
+  });
+
   it('summarizes only the current message, jumps to its start, and searches the original text', async () => {
     const { state, vt } = await mountFullscreen();
     for (const [index, content] of ['one', 'two', 'three', 'four\nfive\nsix'].entries()) {

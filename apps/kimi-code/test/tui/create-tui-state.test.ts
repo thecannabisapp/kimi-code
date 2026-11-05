@@ -57,6 +57,8 @@ describe('createTUIState', () => {
     expect(state.terminal).toBeDefined();
     expect(state.transcriptContainer).toBeDefined();
     expect(state.activityContainer).toBeDefined();
+    expect(state.todoPanelContainer).toBeDefined();
+    expect(state.todoPanel).toBeDefined();
     expect(state.queueContainer).toBeDefined();
     expect(state.surveyContainer).toBeDefined();
     expect(state.editorContainer).toBeDefined();
@@ -126,6 +128,7 @@ describe('createTUIState', () => {
     expect(dock).toBeDefined();
     expect(dock?.children).toEqual([
       state.activityContainer,
+      state.todoPanelContainer,
       state.notifyPanelContainer,
       state.queueContainer,
       state.btwPanelContainer,

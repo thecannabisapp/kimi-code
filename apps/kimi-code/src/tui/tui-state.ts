@@ -17,6 +17,7 @@ import { FooterComponent } from './components/chrome/footer';
 import { GutterContainer } from './components/chrome/gutter-container';
 import type { MoonLoader, SpinnerStyle } from './components/chrome/moon-loader';
 import { NotifyPanelComponent } from './components/chrome/notify-panel';
+import { TodoPanelComponent } from './components/chrome/todo-panel';
 import { QueuePaneComponent } from './components/panes/queue-pane';
 import type { SessionRow } from './components/dialogs/session-picker';
 import { CustomEditor } from './components/editor/custom-editor';
@@ -47,6 +48,8 @@ export interface TUIState {
   terminal: ProcessTerminal;
   transcriptContainer: GutterContainer;
   activityContainer: Container;
+  todoPanelContainer: Container;
+  todoPanel: TodoPanelComponent;
   notifyPanelContainer: Container;
   notifyPanel: NotifyPanelComponent;
   queueContainer: Container;
@@ -153,6 +156,8 @@ export function createTUIState(options: KimiTUIOptions): TUIState {
 
   const transcriptContainer = new GutterContainer(CHROME_GUTTER, CHROME_GUTTER);
   const activityContainer = new GutterContainer(CHROME_GUTTER, CHROME_GUTTER);
+  const todoPanelContainer = new GutterContainer(CHROME_GUTTER, CHROME_GUTTER);
+  const todoPanel = new TodoPanelComponent();
   // Docked panels carry their own gutter, so their fullscreen slot is a
   // layout node rather than a GutterContainer (which the layout treats as one
   // opaque block and could only clip, not scroll).
@@ -185,6 +190,7 @@ export function createTUIState(options: KimiTUIOptions): TUIState {
     const transcriptView = new TranscriptView(transcriptContainer);
     dockContainer = new VStack();
     dockContainer.addChild(activityContainer, { shrink: 1, minSize: 0 });
+    dockContainer.addChild(todoPanelContainer, { shrink: 1, minSize: 0 });
     dockContainer.addChild(notifyPanelContainer, { shrink: 1, minSize: 0 });
     // A blocking prompt (approval or question) takes the space of the queue,
     // the btw panel and the footer, so its options stay on screen.
@@ -209,6 +215,8 @@ export function createTUIState(options: KimiTUIOptions): TUIState {
     terminal,
     transcriptContainer,
     activityContainer,
+    todoPanelContainer,
+    todoPanel,
     notifyPanelContainer,
     notifyPanel,
     queueContainer,
