@@ -1181,6 +1181,7 @@ describe('fullscreen layout', () => {
       state,
       session: {},
       surveyController: { notifyDisplaced: () => {} },
+      disposeEditorReplacement() {},
       modelMigration: { retry: () => {} },
       showError: vi.fn(),
       showStatus: vi.fn(),
@@ -1273,6 +1274,7 @@ describe('fullscreen layout', () => {
     const host = {
       state,
       surveyController: { notifyDisplaced: () => {} },
+      disposeEditorReplacement() {},
     } as unknown as KimiTUI;
     KimiTUI.prototype.mountEditorReplacement.call(host, picker);
     await vt.waitForRender();
@@ -1340,6 +1342,7 @@ describe('fullscreen layout', () => {
     const host = {
       state,
       surveyController: { notifyDisplaced: () => {} },
+      disposeEditorReplacement() {},
       modelMigration: { retry: () => {} },
     } as unknown as KimiTUI;
     const notifications = new NotifyController(state);
