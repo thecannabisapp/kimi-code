@@ -42,14 +42,23 @@ Two paths when adding:
 
   Besides the automatic startup refresh, you can trigger the same refresh manually at runtime: `/provider refresh` re-fetches the model list of every provider, and `/provider refresh <providerId>` limits the refresh to a single provider. The command reports added and removed models per provider; a removed alias stops resolving for agents bound to it on their next turn, so removals are highlighted in the output.
 
+  A registry provider entry may also declare optional `search_url` and `feedback_url` strings (stored as `search_url` and `feedback_url` on `[providers.<id>]`). When non-empty, `WebSearch` and `/feedback` for models under that provider send requests to those URLs authenticated with the provider's credential instead of requiring a managed Kimi Code OAuth login; omitting or removing a field disables it on the next refresh.
+
   These fields are a Kimi registry extension, not part of the models.dev schema:
 
   ```json
   {
-    "upgrade": {
-      "model": "new-model-id",
-      "migration_markdown": "We recommend switching from {model_from} to {model_to}.",
-      "retirement_at": "2027-01-01T00:00:00Z"
+    "search_url": "https://registry.example.com/v1/search",
+    "feedback_url": "https://registry.example.com/v1/feedback",
+    "models": {
+      "current-model": {
+        "id": "current-model-id",
+        "upgrade": {
+          "model": "new-model-id",
+          "migration_markdown": "We recommend switching from {model_from} to {model_to}.",
+          "retirement_at": "2027-01-01T00:00:00Z"
+        }
+      }
     }
   }
   ```
@@ -141,7 +150,7 @@ api_key = "xxxxx"
 
 To route through a Gemini-compatible proxy or gateway, set `base_url` (or the `GOOGLE_GEMINI_BASE_URL` env var); when omitted, the SDK default `https://generativelanguage.googleapis.com` is used.
 
-> Give the **host root only**. The Google GenAI SDK appends the API version and path itself (e.g. `/v1beta/models/<model>:generateContent`), so a trailing `/v1beta` would produce a doubled `/v1beta/v1beta/…`.
+A trailing `/v1beta` is stripped before the request. The SDK then appends the API version and path itself (e.g. `/v1beta/models/<model>:generateContent`).
 
 ```toml
 [providers.gemini]
@@ -170,7 +179,7 @@ gcloud auth application-default login   # one-time authentication
 kimi
 ```
 
-To route Vertex requests through a custom (e.g. proxied) endpoint, set `base_url` (or the `GOOGLE_VERTEX_BASE_URL` env var); when omitted, the SDK default regional `*-aiplatform.googleapis.com` host is used. As with `google-genai`, give the host root only. The SDK appends `/v1beta1/publishers/google/models/…` itself.
+To route Vertex requests through a custom (e.g. proxied) endpoint, set `base_url` (or the `GOOGLE_VERTEX_BASE_URL` env var); when omitted, the SDK default regional `*-aiplatform.googleapis.com` host is used. A trailing `/v1beta1` is stripped before the request. The SDK appends `/v1beta1/publishers/google/models/…` itself.
 
 ## OAuth and credential injection
 

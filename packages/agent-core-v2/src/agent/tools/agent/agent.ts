@@ -53,7 +53,7 @@ export const SubagentToolInputSchema = z.preprocess(
       .min(1)
       .optional()
       .describe(
-        'Which model to run the subagent on: one of the aliases listed under "Available models" in this tool description, or "primary" for your current model and thinking level. When omitted, the configured default model is used. Ignored when resuming — resumed subagents keep their own model.',
+        'Which model to run the subagent on: one of the aliases listed under "Available models" in this tool description. When omitted, the configured default model is used. Ignored when resuming — resumed subagents keep their own model.',
       ),
     run_in_background: z
       .boolean()
@@ -96,6 +96,7 @@ export const SUBAGENT_STOPPED_MESSAGE = 'The subagent was stopped before it fini
 
 export interface ISubagentTool extends AgentTool<SubagentToolInput> {
   readonly _serviceBrand: undefined;
+  invalidateProfileDescriptions(): void;
 }
 
 export const ISubagentTool = createDecorator<ISubagentTool>('subagentTool');

@@ -11,7 +11,7 @@ import {
   CompactionCompleted,
   getLiveSessionById,
   IEventBus,
-  IAgentProfileService,
+  IAgentLoopService,
   IEventDispatcher,
   ISessionManager,
   ISessionMetadata,
@@ -20,7 +20,6 @@ import {
   resumeSessionById,
   SubagentSpawned,
   type CompactionResult,
-  type Scope,
   type TelemetryAppenderRecord,
 } from '@moonshot-ai/agent-core-v2';
 import { ContextAppendMessage } from '@moonshot-ai/agent-core-v2/agent/contextMemory/contextEvents';
@@ -30,15 +29,11 @@ import {
   ToolCallStarted,
   ToolResultEvent,
 } from '@moonshot-ai/agent-core-v2/agent/toolExecutor/toolExecutorEvents';
-import type { SessionRatingHost } from '@moonshot-ai/kimi-code-product/session-rating/node';
-import type { TranscriptItem } from '@moonshot-ai/transcript';
 import type { SessionRatingResult } from '../src/protocol/rest-session-rating';
 import { pino } from 'pino';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
-import { registerSessionRatingRoutes } from '../src/routes/sessionRating';
 import { type RunningServer, startServer } from '../src/start';
-import { type TranscriptService } from '../src/services/transcript/transcriptService';
 import { ensureMainAgent } from '../src/transport/mainAgent';
 import { authHeaders } from './helpers/auth';
 import { TEST_HOST_IDENTITY } from './helpers/hostIdentity';
@@ -90,40 +85,31 @@ class RatingClient {
 
   async finishUserTurn(sessionId: string, during?: (bus: IEventBus) => void, turnId = 1): Promise<void> {
     const agent = await this.mainAgent(sessionId);
-    const before = await this.request<{ items: TranscriptItem[] }>(
-      `/api/v1/sessions/${sessionId}/transcript?agent_id=main`,
-    );
-    strictEqual(before.code, 0);
-    const previousTurnIds = new Set(
-      before.data.items.filter((item) => item.kind === 'turn').map((item) => item.turnId),
-    );
+    strictEqual((await this.request(`/api/v1/sessions/${sessionId}/agents/main/turns`)).code, 0);
     const bus = agent.accessor.get(IEventBus);
     const dispatcher = agent.accessor.get(IEventDispatcher);
     const origin = { kind: 'user' } as const;
-    await dispatcher.dispatch(new TurnPrompt({ agentId: MAIN_AGENT_ID, input: [], origin }));
+    await dispatcher.dispatch(new TurnPrompt({ agentId: MAIN_AGENT_ID, input: [], origin, turnId }));
+    await dispatcher.dispatch(
+      new ContextAppendMessage({
+        agentId: MAIN_AGENT_ID,
+        message: { role: 'user', content: [{ type: 'text', text: 'Please rate.' }], origin },
+      }),
+    );
     bus.publish(new TurnStarted({ agentId: MAIN_AGENT_ID, turnId, origin }));
     during?.(bus);
-    bus.publish(new TurnEnded({
+    await dispatcher.dispatch(new TurnEnded({
       agentId: MAIN_AGENT_ID, turnId, reason: 'completed', requestId: 'trace-1',
     }));
-    await vi.waitFor(async () => {
-      const transcript = await this.request<{ items: TranscriptItem[] }>(
-        `/api/v1/sessions/${sessionId}/transcript?agent_id=main`,
-      );
-      const completed = transcript.data.items.some((item) =>
-        item.kind === 'turn' && item.state !== 'running' && !previousTurnIds.has(item.turnId)
-      );
-      if (!completed) throw new Error('expected the new completed transcript turn');
-    }, { timeout: 15_000 });
   }
 
   async latestTurnId(sessionId: string): Promise<string> {
-    const transcript = await this.request<{ items: TranscriptItem[] }>(
-      `/api/v1/sessions/${sessionId}/transcript?agent_id=main`,
+    const page = await this.request<{ turns: { turn_id: string }[] }>(
+      `/api/v1/sessions/${sessionId}/agents/main/turns`,
     );
-    const turn = transcript.data.items.findLast((item) => item.kind === 'turn');
-    if (turn === undefined) throw new Error('expected a transcript turn');
-    return turn.turnId;
+    const turn = page.data.turns.at(-1);
+    if (turn === undefined) throw new Error('expected a turn');
+    return turn.turn_id;
   }
 
   async evaluate(sessionId: string, turnId?: string): Promise<Envelope<SessionRatingResult>> {
@@ -373,7 +359,7 @@ describe('session rating lifecycle', () => {
 
   it('identifies the managed model and its trace for the kfc check', async () => {
     const id = await client.createSession(home);
-    await (await client.mainAgent(id)).accessor.get(IAgentProfileService).setModel('kimi-code/k3');
+    await (await client.mainAgent(id)).accessor.get(IAgentLoopService).setModel('kimi-code/k3');
     await client.openRating(id);
 
     const appeared = records.find(
@@ -525,23 +511,8 @@ describe('session rating lifecycle', () => {
 
   it('resumes and evaluates a completed turn for a cold session', async () => {
     const id = await client.createSession(home);
-    await (await client.mainAgent(id)).accessor.get(IAgentProfileService).setModel('kimi-code/k3');
+    await (await client.mainAgent(id)).accessor.get(IAgentLoopService).setModel('kimi-code/k3');
     await client.finishUserTurn(id, undefined, 0);
-    const agent = await client.mainAgent(id);
-    const dispatcher = agent.accessor.get(IEventDispatcher);
-    await dispatcher.dispatch(
-      new ContextAppendMessage({
-        agentId: MAIN_AGENT_ID,
-        message: {
-          role: 'user',
-          content: [{ type: 'text', text: 'Please review this answer.' }],
-          origin: { kind: 'user' },
-        },
-      }),
-    );
-    await dispatcher.dispatch(
-      new TurnEnded({ agentId: MAIN_AGENT_ID, turnId: 0, reason: 'completed', requestId: 'trace-1' }),
-    );
     const turnId = await client.latestTurnId(id);
     expect(await server.core.accessor.get(ISessionManager).closeIfIdle(id, 0)).toBe(true);
     const result = await client.evaluate(id, turnId);
@@ -558,12 +529,12 @@ describe('session rating lifecycle', () => {
     expect(appeared?.properties).toMatchObject({ kfc_trace_id: 'trace-1', user_turn_count: 1 });
   });
 
-  it('does not load sessions when evaluating or reporting unknown appearances', async () => {
+  it('does not load a session to report an unknown appearance and offers nothing for a stale turn', async () => {
     const id = await client.createSession(home);
     await closeSessionById(server.core.accessor, id);
-    expect(await client.evaluate(id, 'turn-1')).toMatchObject({ code: 0, data: { appearance: null } });
     expect(await client.respond(id, 'unknown', 'good')).toMatchObject({ code: 0, data: null });
     expect(getLiveSessionById(server.core.accessor, id)).toBeUndefined();
+    expect(await client.evaluate(id, 'turn-1')).toMatchObject({ code: 0, data: { appearance: null } });
   });
 
   it('does not recover unfinished appearances after server restart', async () => {
@@ -574,80 +545,5 @@ describe('session rating lifecycle', () => {
     client = new RatingClient(server);
     await client.respond(id, appearance, 'fine');
     expect(ratingEvents(id)).toEqual([['appeared', undefined, 1]]);
-  });
-});
-
-describe('session rating route transcript readiness', () => {
-  it('awaits live transcript readiness before reading a newly created store', async () => {
-    const calls: string[] = [];
-    let releaseReady!: () => void;
-    const ready = new Promise<void>((resolve) => {
-      releaseReady = resolve;
-    });
-    let mainVisible = false;
-    const transcripts = {
-      forSessionLive: (sessionId: string) => {
-        calls.push(`forSessionLive:${sessionId}`);
-        return {
-          getAgent: (agentId: string) => {
-            calls.push(`getAgent:${agentId}`);
-            return mainVisible
-              ? { getItems: () => [{ kind: 'turn', turnId: 'turn-1', state: 'completed' }] }
-              : undefined;
-          },
-        };
-      },
-      whenReady: async (sessionId: string) => {
-        calls.push(`whenReady:${sessionId}`);
-        await ready;
-      },
-      readColdSnapshot: async () => {
-        calls.push('readColdSnapshot');
-        return undefined;
-      },
-    } as unknown as TranscriptService;
-    const sessionRating = {
-      evaluate: (sessionId: string) => {
-        calls.push(`evaluate:${sessionId}`);
-        return undefined;
-      },
-      whenReady: async () => {},
-      report: () => {},
-    } as unknown as SessionRatingHost;
-    let handler:
-      | ((
-          req: { id: string; params: unknown; body: unknown; headers: Record<string, unknown> },
-          reply: { send(payload: unknown): unknown },
-        ) => Promise<void>)
-      | undefined;
-    registerSessionRatingRoutes(
-      {
-        post: (_path: string, _options: unknown, next: unknown) => {
-          handler = next as typeof handler;
-        },
-      } as never,
-      sessionRating,
-      transcripts,
-      { accessor: { get: () => undefined } } as unknown as Scope,
-    );
-
-    let payload: unknown;
-    const pending = handler!({
-      id: 'req-1',
-      params: { session_id: 's1' },
-      body: { op: 'evaluate', turn_id: 'turn-1' },
-      headers: {},
-    }, {
-      send: (value: unknown) => {
-        payload = value;
-      },
-    });
-    expect(calls).toEqual(['forSessionLive:s1', 'whenReady:s1']);
-
-    mainVisible = true;
-    releaseReady();
-    await pending;
-    expect(calls).toEqual(['forSessionLive:s1', 'whenReady:s1', 'getAgent:main', 'evaluate:s1']);
-    expect(payload).toMatchObject({ code: 0, data: { appearance: null } });
   });
 });

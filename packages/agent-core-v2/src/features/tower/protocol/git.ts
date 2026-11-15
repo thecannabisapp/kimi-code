@@ -21,6 +21,7 @@ export class GitError extends Error {
 export interface GitOptions {
   readonly env?: Readonly<Record<string, string>>;
   readonly input?: string;
+  readonly trimEnd?: boolean;
 }
 
 function isUpdateRefLockCollision(error: unknown): boolean {
@@ -57,7 +58,7 @@ async function execGit(
           );
           return;
         }
-        resolve(stdout.trimEnd());
+        resolve(options.trimEnd === false ? stdout : stdout.trimEnd());
       },
     );
     if (options.input !== undefined) child.stdin?.end(options.input);
@@ -273,6 +274,8 @@ export async function diffNameOnly(
   base: string,
   ref: string,
 ): Promise<readonly string[]> {
-  const out = await git(cwd, ['diff', '--name-only', `${base}...${ref}`]);
-  return out.length === 0 ? [] : out.split('\n').filter((line) => line.trim().length > 0);
+  const out = await git(cwd, ['diff', '--name-only', '-z', `${base}...${ref}`], {
+    trimEnd: false,
+  });
+  return out.length === 0 ? [] : out.split('\0').filter((path) => path.length > 0);
 }

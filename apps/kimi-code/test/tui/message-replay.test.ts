@@ -29,12 +29,18 @@ import { ToolCallComponent } from '#/tui/components/messages/tool-call';
 import { ReadGroupComponent } from '#/tui/components/messages/read-group';
 import { replayBackgroundProjection } from '#/tui/utils/message-replay';
 import type { TaskNotificationOrigin } from '#/tui/utils/message-replay';
+import { isToolCallId, monotonicNow, phaseAt, type ToolCallId } from '#/tui/utils/turn-timeline';
 
 vi.mock('#/utils/open-url', () => ({ openUrl: vi.fn() }));
 
 type GoalReplayRecord = Extract<AgentReplayRecord, { type: 'goal_updated' }>;
 
 const REPLAY_TIME = 1_700_000_000_000;
+
+function callId(id: string): ToolCallId {
+  if (!isToolCallId(id)) throw new Error('a tool call id is never empty');
+  return id;
+}
 
 function stripAnsi(text: string): string {
   return text.replaceAll(/\u001B\[[0-9;]*m/g, '');
@@ -70,6 +76,7 @@ function makeStartupInput(): KimiTUIStartupInput {
       editorCommand: null,
       notifications: { enabled: true, condition: 'unfocused' },
       upgrade: { autoInstall: true },
+      transcript: { toolCallDensity: 'compact', thinking: 'grouped' },
       statusLine: { items: null, command: null },
     },
     version: '0.0.0-test',
@@ -251,7 +258,6 @@ function makeHarness(initialSession: Session) {
       login: vi.fn(),
       logout: vi.fn(),
       getManagedUsage: vi.fn(),
-      submitFeedback: vi.fn(async () => ({ kind: 'ok', feedbackId: 3 })),
     },
   };
 }
@@ -428,7 +434,7 @@ describe('KimiTUI resume message replay', () => {
       ),
     ]);
     const driver = await makeDriver(initial);
-    driver.state.toolOutputExpanded = true;
+    driver.state.transcriptContainer.toggleToolOutputExpansion();
     await driver.switchToSession(resumed, 'Resumed session (ses-replay).');
 
     const transcript = stripAnsi(driver.state.transcriptContainer.render(140).join('\n'));
@@ -783,6 +789,8 @@ describe('KimiTUI resume message replay', () => {
     expect(driver.streamingUI.hasPendingReadGroup()).toBe(false);
     expect(driver.streamingUI.getToolComponent('call_read_1')).toBeUndefined();
     expect(driver.streamingUI.getToolComponent('call_read_2')).toBeUndefined();
+    expect(phaseAt(driver.streamingUI.timeline.call(callId('call_read_1')), monotonicNow())).toEqual({ kind: 'history' });
+    expect(driver.streamingUI.timeline.turn()).toBeUndefined();
   });
 
   it('renders replayed AgentSwarm calls as compact result summaries', async () => {
@@ -1277,8 +1285,8 @@ describe('KimiTUI resume message replay', () => {
           origin: {
             kind: 'user',
             skillActivations: [
-              { activationId: 'act-1', skillName: 'review' },
-              { activationId: 'act-2', skillName: 'security' },
+              { activationId: 'act-1', skillName: 'review', skillPath: '/work/A/review/SKILL.md' },
+              { activationId: 'act-2', skillName: 'security', skillPath: '/work/B/security/SKILL.md' },
             ],
           } as PromptOrigin,
         },
@@ -1289,6 +1297,10 @@ describe('KimiTUI resume message replay', () => {
     expect(entries.map((entry) => entry.kind)).toEqual(['user']);
     expect(entries[0]!.content).toBe('please /skill:review and /skill:security');
     expect(entries[0]!.skillNames).toEqual(['review', 'security']);
+    expect(entries[0]!.inlineSkillActivations).toEqual([
+      { skillName: 'review', path: '/work/A/review/SKILL.md' },
+      { skillName: 'security', path: '/work/B/security/SKILL.md' },
+    ]);
     expect(driver.sessionEventHandler.seenSkillActivationIds.has('act-1')).toBe(true);
     expect(driver.sessionEventHandler.seenSkillActivationIds.has('act-2')).toBe(true);
     const transcript = stripAnsi(driver.state.transcriptContainer.render(120).join('\n'));
@@ -1405,6 +1417,7 @@ describe('KimiTUI resume message replay', () => {
           kind: 'skill_activation',
           activationId: 'act-review',
           skillName: 'review',
+          skillPath: '/work/B/review/SKILL.md',
           skillArgs: 'src/app.ts',
           trigger: 'user-slash',
         },
@@ -1418,6 +1431,9 @@ describe('KimiTUI resume message replay', () => {
     expect(entries.map((entry) => entry.kind)).toEqual(['user']);
     expect(entries[0]!.content).toBe('/skill:review src/app.ts');
     expect(entries[0]!.skillNames).toEqual(['review']);
+    expect(entries[0]!.inlineSkillActivations).toEqual([
+      { skillName: 'review', path: '/work/B/review/SKILL.md' },
+    ]);
     expect(entries[0]!.skillActivationId).toBe('act-review');
     expect(entries[0]!.skillName).toBe('review');
     expect(entries[0]!.skillArgs).toBe('src/app.ts');
@@ -1685,7 +1701,7 @@ describe('KimiTUI resume message replay', () => {
       },
     ]);
     const driver = await makeDriver(initial);
-    driver.state.toolOutputExpanded = true;
+    driver.state.transcriptContainer.toggleToolOutputExpansion();
     await driver.switchToSession(resumed, 'Resumed session (ses-replay).');
 
     const transcript = stripAnsi(driver.state.transcriptContainer.render(120).join('\n'));

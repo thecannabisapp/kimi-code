@@ -57,12 +57,14 @@ export interface FetchCustomRegistryOptions {
 
 /**
  * `kimi` is included because the api.json schema permits it even though kokub
- * itself only emits the other three.
+ * itself only emits the other three. `google-genai` is the Gemini generateContent
+ * type registries emit for that protocol.
  */
 export type CustomRegistryProviderType =
   | 'anthropic'
   | 'openai'
   | 'openai_responses'
+  | 'google-genai'
   | 'kimi';
 
 export interface CustomRegistryModelUpgrade {
@@ -92,6 +94,8 @@ export interface CustomRegistryProviderEntry {
   readonly api: string;
   readonly type: CustomRegistryProviderType;
   readonly env?: readonly string[];
+  readonly search_url?: string;
+  readonly feedback_url?: string;
   readonly models: Record<string, CustomRegistryModelEntry>;
 }
 
@@ -107,6 +111,7 @@ const ALLOWED_PROVIDER_TYPES: ReadonlySet<CustomRegistryProviderType> = new Set(
   'anthropic',
   'openai',
   'openai_responses',
+  'google-genai',
   'kimi',
 ]);
 
@@ -286,15 +291,29 @@ function toProviderEntry(value: unknown): CustomRegistryProviderEntry | undefine
   }
 
   const env = toStringArrayOrUndefined(value['env']);
-
-  return {
+  const searchUrl = nonEmptyString(value['search_url']);
+  const feedbackUrl = nonEmptyString(value['feedback_url']);
+  const entry: {
+    id: string;
+    name: string;
+    api: string;
+    type: CustomRegistryProviderType;
+    env?: readonly string[];
+    search_url?: string;
+    feedback_url?: string;
+    models: Record<string, CustomRegistryModelEntry>;
+  } = {
     id,
     name,
     api,
     type,
-    ...(env !== undefined ? { env } : {}),
     models: parsedModels,
   };
+  if (env !== undefined) entry.env = env;
+  if (searchUrl !== undefined) entry.search_url = searchUrl;
+  if (feedbackUrl !== undefined) entry.feedback_url = feedbackUrl;
+
+  return entry;
 }
 
 /**
@@ -432,6 +451,11 @@ function resolveCapabilities(model: CustomRegistryModelEntry): string[] {
  * unchanged. Reserved ids and endpoint changes are rejected before mutation so
  * a registry cannot redirect the environment-backed credential.
  */
+function changedActiveEndpoint(previous: unknown, next: string | undefined): boolean {
+  const nextNorm = normalizedEndpoint(next);
+  return nextNorm !== undefined && normalizedEndpoint(previous) !== nextNorm;
+}
+
 function retainedApiKeyEnv(
   existing: unknown,
   entry: CustomRegistryProviderEntry,
@@ -447,7 +471,9 @@ function retainedApiKeyEnv(
   const apiKeyEnv = nonEmptyString(existing['apiKeyEnv']);
   if (
     apiKeyEnv !== undefined &&
-    normalizedEndpoint(existing['baseUrl']) !== normalizedEndpoint(entry.api)
+    (normalizedEndpoint(existing['baseUrl']) !== normalizedEndpoint(entry.api) ||
+      changedActiveEndpoint(existing['searchUrl'], entry.search_url) ||
+      changedActiveEndpoint(existing['feedbackUrl'], entry.feedback_url))
   ) {
     throw new Error(
       `Custom registry provider "${entry.id}" changed endpoint while api_key_env is configured. Remove api_key_env, re-import the registry, verify the new endpoint, then restore api_key_env.`,
@@ -465,7 +491,7 @@ export function applyCustomRegistryProvider(
   const providerKey = entry.id;
   const existing = priorProviders?.[providerKey] ?? config.providers[providerKey];
   const existingApiKeyEnv = retainedApiKeyEnv(existing, entry, source);
-  config.providers[providerKey] =
+  const providerRecord: Record<string, unknown> =
     existingApiKeyEnv === undefined
       ? {
           type: entry.type,
@@ -479,6 +505,9 @@ export function applyCustomRegistryProvider(
           apiKeyEnv: existingApiKeyEnv,
           source,
         };
+  if (entry.search_url !== undefined) providerRecord['searchUrl'] = entry.search_url;
+  if (entry.feedback_url !== undefined) providerRecord['feedbackUrl'] = entry.feedback_url;
+  config.providers[providerKey] = providerRecord as ManagedKimiConfigShape['providers'][string];
 
   const existingModels = config.models ?? {};
   // Selectively merge upstream models into the existing config so any fields
