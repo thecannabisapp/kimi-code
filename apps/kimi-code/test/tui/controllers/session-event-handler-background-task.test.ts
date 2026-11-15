@@ -203,6 +203,7 @@ function makeSessionEventHost() {
       tasksBrowser: undefined,
       footer: { setBackgroundCounts: vi.fn() },
       ui: { requestRender: vi.fn() },
+      todoPanel: { getTodos: vi.fn(() => []) },
     },
     session: { id: 's1' },
     aborted: false,

@@ -60,6 +60,7 @@ function makeHost(options: { createGoalRejects?: boolean } = {}) {
       toolOutputExpanded: false,
       transcriptContainer: { addChild: vi.fn() },
       ui: { requestRender: vi.fn() },
+      todoPanel: { getTodos: vi.fn(() => []) },
     },
     session,
     aborted: false,

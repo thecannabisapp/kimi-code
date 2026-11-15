@@ -15,6 +15,7 @@ import { IGoalDeadlineScheduler } from '#/features/goal/goalDeadlineScheduler';
 import { GoalDeadlineSchedulerService } from '#/features/goal/goalDeadlineSchedulerService';
 import { IAgentLoopService } from '#/agent/loop/loop';
 import { IAgentScopeContext } from '#/agent/scopeContext/scopeContext';
+import { IAgentTaskService } from '#/agent/task/task';
 import { IAgentToolExecutorService } from '#/agent/toolExecutor/toolExecutor';
 import { ISessionUsageService } from '#/session/usage/sessionUsage';
 import { IAgentLifecycleService } from '#/session/agentLifecycle/agentLifecycle';
@@ -110,6 +111,10 @@ function buildHost(key: string): GoalHost {
   ix.set(IEventBus, new SyncDescriptor(EventBusService));
   ix.stub(IAgentLoopService, createLoopStub());
   ix.stub(IAgentLifecycleService, { onWillClose: Event.None } as IAgentLifecycleService);
+  ix.stub(IAgentTaskService, {
+    onDidChangeTask: Event.None,
+    list: () => [],
+  } as unknown as IAgentTaskService);
   ix.stub(ISessionUsageService, {
     onDidRecord: Event.None,
   } as unknown as ISessionUsageService);

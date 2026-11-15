@@ -494,8 +494,8 @@ describe('KimiTUI startup', () => {
     await expect(driver.init()).resolves.toBe(false);
     mountFooter(driver.state);
 
-    // Dock = 6 chrome containers + footer wrap, below the transcript viewport.
-    expect(driver.state.dockContainer?.children).toHaveLength(7);
+    // Dock = 7 chrome containers + footer wrap, below the transcript viewport.
+    expect(driver.state.dockContainer?.children).toHaveLength(8);
     expect(driver.state.activityContainer.render(80).map((line) => line.trim())).toEqual(['']);
   });
 
